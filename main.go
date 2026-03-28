@@ -116,10 +116,20 @@ func main() {
 		auth.POST("/provider-configs/fetch-deploy-options", handler.FetchDeployFieldOptions)
 		auth.DELETE("/provider-configs/:id", handler.DeleteProviderConfig)
 		auth.POST("/provider-configs/:id/test", handler.TestProviderConfig)
+
+		// 流量统计
+		auth.GET("/stats/summary", handler.StatsSummary)
+		auth.GET("/stats/timeseries", handler.StatsTimeSeries)
+		auth.GET("/stats/geo", handler.StatsGeo)
+		auth.POST("/stats/collect", handler.StatsTriggerCollect)
+		auth.GET("/sites/:id/stats", handler.SiteStat)
 	}
 
 	// 启动后台 DNS 缓存同步（每15分钟）
 	service.DnsSync.StartBackgroundSync()
+
+	// 启动后台流量统计采集（每15分钟）
+	service.StatsCollect.StartBackgroundCollect()
 
 	// 启动后台证书状态同步（每5分钟）
 	service.CertSync.StartBackgroundSync()

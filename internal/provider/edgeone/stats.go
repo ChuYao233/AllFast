@@ -33,15 +33,16 @@ func (e *EdgeOneProvider) GetTimeSeries(ctx context.Context, cfg map[string]stri
 		return nil, err
 	}
 
+	// 实际响应结构：Data[].TypeValue[].{MetricName, Detail[].{Timestamp, Value}}
 	var resp struct {
 		Response struct {
 			Data []struct {
-				TypeKey   string `json:"TypeKey"`
 				TypeValue []struct {
-					DetailData []struct {
-						Time        int64   `json:"Time"`
-						MetricValue float64 `json:"MetricValue"`
-					} `json:"DetailData"`
+					MetricName string `json:"MetricName"`
+					Detail     []struct {
+						Timestamp int64   `json:"Timestamp"`
+						Value     float64 `json:"Value"`
+					} `json:"Detail"`
 				} `json:"TypeValue"`
 			} `json:"Data"`
 			Error *struct {
@@ -62,16 +63,15 @@ func (e *EdgeOneProvider) GetTimeSeries(ctx context.Context, cfg map[string]stri
 	timeMap := map[int64]*pt{}
 	for _, d := range resp.Response.Data {
 		for _, tv := range d.TypeValue {
-			for _, dd := range tv.DetailData {
-				if timeMap[dd.Time] == nil {
-					timeMap[dd.Time] = &pt{}
+			for _, detail := range tv.Detail {
+				if timeMap[detail.Timestamp] == nil {
+					timeMap[detail.Timestamp] = &pt{}
 				}
-				switch d.TypeKey {
+				switch tv.MetricName {
 				case "l7Flow_request":
-					timeMap[dd.Time].requests += int64(dd.MetricValue)
+					timeMap[detail.Timestamp].requests += int64(detail.Value)
 				case "l7Flow_outFlux":
-					// outFlux 单位 Byte
-					timeMap[dd.Time].bytes += int64(dd.MetricValue)
+					timeMap[detail.Timestamp].bytes += int64(detail.Value)
 				}
 			}
 		}
@@ -101,9 +101,10 @@ func (e *EdgeOneProvider) GetGeoDistribution(ctx context.Context, cfg map[string
 		"EndTime":    to.UTC().Format("2006-01-02T15:04:05Z"),
 		"ZoneIds":    []string{zoneID},
 		"MetricName": "l7Flow_request",
-		"Limit":      200,
-		"QueryCondition": []map[string]interface{}{
-			{"Key": "Country", "Operator": "equals", "Value": []string{"*"}},
+		"Limit":      100,
+		// Filters 指定按 country 维度聚合，否则 API 不知道分组维度会报 InvalidParameter
+		"Filters": []map[string]interface{}{
+			{"Key": "country", "Operator": "include", "Value": []string{"all"}},
 		},
 	}
 
