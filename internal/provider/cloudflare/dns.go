@@ -71,6 +71,9 @@ func (c *CloudflareProvider) ListZones(ctx context.Context, cfg map[string]strin
 				ID     string `json:"id"`
 				Name   string `json:"name"`
 				Status string `json:"status"`
+				Plan   struct {
+					Name string `json:"name"`
+				} `json:"plan"`
 			} `json:"result"`
 			Errors []cfError `json:"errors"`
 		}
@@ -83,9 +86,10 @@ func (c *CloudflareProvider) ListZones(ctx context.Context, cfg map[string]strin
 
 		for _, z := range resp.Result {
 			zones = append(zones, model.DnsZone{
-				ID:     z.ID,
-				Name:   z.Name,
-				Status: z.Status,
+				ID:       z.ID,
+				Name:     z.Name,
+				Status:   z.Status,
+				PlanName: cfPlanShortName(z.Plan.Name),
 			})
 		}
 
@@ -296,6 +300,22 @@ func (c *CloudflareProvider) DeleteRecord(ctx context.Context, cfg map[string]st
 }
 
 // ===== 内部工具 =====
+
+// cfPlanShortName 将 Cloudflare 套餐全名映射为简短显示名
+func cfPlanShortName(name string) string {
+	switch {
+	case strings.Contains(name, "Enterprise"):
+		return "Enterprise"
+	case strings.Contains(name, "Business"):
+		return "Business"
+	case strings.Contains(name, "Pro"):
+		return "Pro"
+	case strings.Contains(name, "Free"):
+		return "Free"
+	default:
+		return name
+	}
+}
 
 // cfTTL 处理 TTL 值，0 表示自动
 func cfTTL(ttl int) int {

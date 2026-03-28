@@ -4,6 +4,7 @@ import (
 	"allfast/internal/model"
 	"context"
 	"fmt"
+	"time"
 )
 
 // CDNProvider CDN提供商统一接口
@@ -108,6 +109,28 @@ func ListAllDNS() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// ===== 流量统计提供商注册表 =====
+
+// StatsProvider 流量统计接口（各 CDN 提供商实现）
+type StatsProvider interface {
+	// GetTimeSeries 获取指定 zone 的小时粒度时间序列数据
+	GetTimeSeries(ctx context.Context, cfg map[string]string, zoneID string, from, to time.Time) ([]model.StatPoint, error)
+	// GetGeoDistribution 获取地区分布统计
+	GetGeoDistribution(ctx context.Context, cfg map[string]string, zoneID string, from, to time.Time) ([]model.GeoPoint, error)
+}
+
+var statsProviders = map[string]StatsProvider{}
+
+// RegisterStats 注册流量统计提供商
+func RegisterStats(name string, p StatsProvider) {
+	statsProviders[name] = p
+}
+
+// GetStats 按名称获取流量统计提供商，不存在返回 nil
+func GetStats(name string) StatsProvider {
+	return statsProviders[name]
 }
 
 // Init 由各子包 init() 自动注册，此处保留为空以兼容调用方
