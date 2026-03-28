@@ -38,6 +38,10 @@ func Init() error {
 		return err
 	}
 
+	if err = createStatsTables(); err != nil {
+		return err
+	}
+
 	if err = seedAdmin(); err != nil {
 		return err
 	}
@@ -243,6 +247,66 @@ func createDnsCacheTables() error {
 
 	for _, t := range tables {
 		if _, err := DnsCacheDB.Exec(t); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// createStatsTables 创建 CDN 流量统计相关表（幂等）
+func createStatsTables() error {
+	tables := []string{
+		// 小时粒度原始数据，15分钟采集写入，0点后合并清理
+		`CREATE TABLE IF NOT EXISTS cdn_stats_raw (
+			id BIGSERIAL PRIMARY KEY,
+			config_id INTEGER NOT NULL,
+			provider TEXT NOT NULL,
+			zone_id TEXT NOT NULL DEFAULT '',
+			period_start TIMESTAMP NOT NULL,
+			requests BIGINT DEFAULT 0,
+			bytes BIGINT DEFAULT 0,
+			cached_requests BIGINT DEFAULT 0,
+			cached_bytes BIGINT DEFAULT 0,
+			collected_at TIMESTAMP DEFAULT NOW(),
+			UNIQUE(config_id, zone_id, period_start)
+		)`,
+		// 每日聚合（永久保留）
+		`CREATE TABLE IF NOT EXISTS cdn_stats_daily (
+			id BIGSERIAL PRIMARY KEY,
+			config_id INTEGER NOT NULL,
+			provider TEXT NOT NULL,
+			zone_id TEXT NOT NULL DEFAULT '',
+			stat_date DATE NOT NULL,
+			requests BIGINT DEFAULT 0,
+			bytes BIGINT DEFAULT 0,
+			cached_requests BIGINT DEFAULT 0,
+			cached_bytes BIGINT DEFAULT 0,
+			UNIQUE(config_id, zone_id, stat_date)
+		)`,
+		// 地区分布（每日，永久保留）
+		`CREATE TABLE IF NOT EXISTS cdn_stats_geo (
+			id BIGSERIAL PRIMARY KEY,
+			config_id INTEGER NOT NULL,
+			provider TEXT NOT NULL,
+			zone_id TEXT NOT NULL DEFAULT '',
+			stat_date DATE NOT NULL,
+			country_code TEXT NOT NULL,
+			country_name TEXT NOT NULL,
+			requests BIGINT DEFAULT 0,
+			bytes BIGINT DEFAULT 0,
+			UNIQUE(config_id, zone_id, stat_date, country_code)
+		)`,
+		// 采集状态记录
+		`CREATE TABLE IF NOT EXISTS cdn_stats_collect_status (
+			config_id INTEGER NOT NULL,
+			zone_id TEXT NOT NULL DEFAULT '',
+			last_collected_at TIMESTAMP,
+			last_geo_collected_at TIMESTAMP,
+			PRIMARY KEY(config_id, zone_id)
+		)`,
+	}
+	for _, t := range tables {
+		if _, err := DB.Exec(t); err != nil {
 			return err
 		}
 	}
