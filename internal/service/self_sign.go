@@ -422,6 +422,7 @@ func ListSelfSignedCerts() ([]model.SelfSignedCert, error) {
 	rows, err := database.DB.Query(`
 		SELECT s.id, s.name, s.cert_type, s.algorithm, s.subject_cn,
 		       s.subject_o, s.subject_ou, s.subject_c, s.purpose,
+		       s.domains,
 		       s.issuer_id, COALESCE(p.name, '') AS issuer_name,
 		       s.serial_number, s.fingerprint, s.not_before, s.not_after,
 		       s.validity_days, s.is_ca, s.key_usage, s.ext_key_usage, s.created_at
@@ -440,6 +441,7 @@ func ListSelfSignedCerts() ([]model.SelfSignedCert, error) {
 		if err := rows.Scan(
 			&c.ID, &c.Name, &c.CertType, &c.Algorithm, &c.SubjectCN,
 			&c.SubjectO, &c.SubjectOU, &c.SubjectC, &c.Purpose,
+			&c.Domains,
 			&c.IssuerID, &c.IssuerName,
 			&c.SerialNumber, &c.Fingerprint, &c.NotBefore, &c.NotAfter,
 			&c.ValidityDays, &isCA, &c.KeyUsage, &c.ExtKeyUsage, &c.CreatedAt,
