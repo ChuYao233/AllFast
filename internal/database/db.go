@@ -197,6 +197,7 @@ func createTables() error {
 	// 增量迁移：新列 + 关键索引（幂等，已存在时静默跳过）
 	migrations := []string{
 		`ALTER TABLE deployments ADD COLUMN IF NOT EXISTS deploy_log TEXT DEFAULT ''`,
+		`ALTER TABLE sites ADD COLUMN IF NOT EXISTS tracking_share_token TEXT DEFAULT ''`,
 		// 关键查询索引
 		`CREATE INDEX IF NOT EXISTS idx_deployments_site_id ON deployments(site_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_deployments_config_id ON deployments(config_id)`,

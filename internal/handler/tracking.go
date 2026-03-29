@@ -4,6 +4,7 @@ import (
 	"allfast/internal/database"
 	"allfast/internal/model"
 	"allfast/internal/util"
+	cryptoRand "crypto/rand"
 	"crypto/sha256"
 	"fmt"
 	"net"
@@ -200,6 +201,71 @@ func GetTrackingCode(c *gin.Context) {
 	code := fmt.Sprintf(`<script defer src="%s://%s/tracker.js" data-site-id="%s"></script>`,
 		scheme, host, siteID)
 	c.JSON(http.StatusOK, gin.H{"code": code, "site_id": siteID, "domain": domain})
+}
+
+// GetTrackingShare GET /api/sites/:id/tracking/share — 获取当前共享 token
+func GetTrackingShare(c *gin.Context) {
+	siteID := c.Param("id")
+	var token string
+	if err := database.DB.QueryRow("SELECT COALESCE(tracking_share_token,'') FROM sites WHERE id = $1", siteID).Scan(&token); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "站点不存在"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"token": token, "enabled": token != ""})
+}
+
+// CreateTrackingShare POST /api/sites/:id/tracking/share — 生成或重置共享 token
+func CreateTrackingShare(c *gin.Context) {
+	siteID := c.Param("id")
+	// 生成随机 token（16 字节 hex，crypto/rand）
+	raw := make([]byte, 16)
+	if _, err := cryptoRand.Read(raw); err != nil {
+		// fallback: sha256(timestamp + siteID)
+		h := sha256.Sum256([]byte(fmt.Sprintf("%d-%s", time.Now().UnixNano(), siteID)))
+		raw = h[:16]
+	}
+	token := fmt.Sprintf("%x", raw)
+	if _, err := database.DB.Exec("UPDATE sites SET tracking_share_token=$1 WHERE id=$2", token, siteID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "生成失败"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"token": token, "enabled": true})
+}
+
+// DeleteTrackingShare DELETE /api/sites/:id/tracking/share — 禁用共享
+func DeleteTrackingShare(c *gin.Context) {
+	siteID := c.Param("id")
+	database.DB.Exec("UPDATE sites SET tracking_share_token='' WHERE id=$1", siteID)
+	c.JSON(http.StatusOK, gin.H{"token": "", "enabled": false})
+}
+
+// GetPublicTrackingStats GET /share/analytics/:token — 公开访问（无需认证）
+func GetPublicTrackingStats(c *gin.Context) {
+	token := c.Param("token")
+	if token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效链接"})
+		return
+	}
+	var siteID string
+	if err := database.DB.QueryRow(
+		"SELECT id FROM sites WHERE tracking_share_token=$1 AND tracking_share_token != ''", token,
+	).Scan(&siteID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "共享链接不存在或已禁用"})
+		return
+	}
+	from, to := parseStatsRangeParams(c)
+	var stats model.TrackingStats
+	queryPeriodTrackingStats(siteID, from, to, &stats.Visitors, &stats.Pageviews, &stats.BounceRate, &stats.AvgDuration)
+	duration := to.Sub(from)
+	prevTo, prevFrom := from, from.Add(-duration)
+	queryPeriodTrackingStats(siteID, prevFrom, prevTo, &stats.PrevVisitors, &stats.PrevPageviews, &stats.PrevBounceRate, &stats.PrevAvgDuration)
+	stats.Pages = trackingBreakdown(siteID, "path", from, to, 10)
+	stats.Referrers = trackingBreakdown(siteID, "referrer", from, to, 10)
+	stats.Browsers = trackingBreakdown(siteID, "browser", from, to, 8)
+	stats.OSes = trackingBreakdown(siteID, "os", from, to, 8)
+	stats.Countries = trackingBreakdown(siteID, "country_code", from, to, 10)
+	stats.Chart = trackingChart(siteID, from, to)
+	c.JSON(http.StatusOK, stats)
 }
 
 // ---- helpers ----
