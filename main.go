@@ -132,6 +132,10 @@ func main() {
 		auth.PUT("/system/console-tls", handler.SystemSaveConsoleTLS)
 		auth.DELETE("/system/console-tls", handler.SystemDeleteConsoleTLS)
 
+		// 数据备份
+		auth.GET("/backup/export", handler.ExportBackup)
+		auth.POST("/backup/import", handler.ImportBackup)
+
 		// 流量统计
 		auth.GET("/stats/summary", handler.StatsSummary)
 		auth.GET("/stats/timeseries", handler.StatsTimeSeries)

@@ -2,11 +2,14 @@ package handler
 
 import (
 	"allfast/internal/database"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -218,7 +221,7 @@ func queryAllRows(query string, args ...any) ([]map[string]any, error) {
 }
 
 // insertRows 通用：将 []map[string]any 批量插入指定表（在事务中执行）
-func insertRows(tx dbExecer, table string, rows []map[string]any) error {
+func insertRows(tx *sql.Tx, table string, rows []map[string]any) error {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -232,13 +235,7 @@ func insertRows(tx dbExecer, table string, rows []map[string]any) error {
 			cols = append(cols, k)
 		}
 		// 排序保证稳定
-		for i := 0; i < len(cols)-1; i++ {
-			for j := i + 1; j < len(cols); j++ {
-				if cols[i] > cols[j] {
-					cols[i], cols[j] = cols[j], cols[i]
-				}
-			}
-		}
+		sort.Strings(cols)
 		vals := make([]any, len(cols))
 		for i, c := range cols {
 			vals[i] = row[c]
@@ -252,39 +249,12 @@ func insertRows(tx dbExecer, table string, rows []map[string]any) error {
 		}
 		query := fmt.Sprintf(`INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (id) DO NOTHING`,
 			table,
-			joinStrings(quotedCols),
-			joinStrings(placeholders),
+			strings.Join(quotedCols, ", "),
+			strings.Join(placeholders, ", "),
 		)
 		if _, err := tx.Exec(query, vals...); err != nil {
 			return fmt.Errorf("插入 %s 行失败: %w", table, err)
 		}
 	}
 	return nil
-}
-
-// dbExecer 支持事务执行的接口
-type dbExecer interface {
-	Exec(query string, args ...any) (interface{ RowsAffected() (int64, error) }, error)
-}
-
-// sqlTxExecer 包装 *sql.Tx 以满足 dbExecer 接口（实际 sql.Result 已实现 RowsAffected）
-type sqlTxWrapper struct {
-	tx interface {
-		Exec(string, ...any) (sqlResult, error)
-	}
-}
-
-type sqlResult interface {
-	RowsAffected() (int64, error)
-}
-
-func joinStrings(ss []string) string {
-	result := ""
-	for i, s := range ss {
-		if i > 0 {
-			result += ", "
-		}
-		result += s
-	}
-	return result
 }
