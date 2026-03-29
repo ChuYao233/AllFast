@@ -315,6 +315,22 @@ func createStatsTables() error {
 			last_geo_collected_at TIMESTAMP,
 			PRIMARY KEY(config_id, zone_id)
 		)`,
+		// 站点访客追踪（tracker.js 埋点）
+		`CREATE TABLE IF NOT EXISTS page_views (
+			id          BIGSERIAL PRIMARY KEY,
+			site_id     INTEGER   NOT NULL,
+			visitor_id  TEXT      NOT NULL,
+			session_id  TEXT      NOT NULL DEFAULT '',
+			path        TEXT      NOT NULL,
+			referrer    TEXT      NOT NULL DEFAULT '',
+			browser     TEXT      NOT NULL DEFAULT '',
+			os          TEXT      NOT NULL DEFAULT '',
+			country_code TEXT     NOT NULL DEFAULT '',
+			duration    INTEGER   NOT NULL DEFAULT 0,
+			created_at  TIMESTAMP NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_pv_site_time ON page_views(site_id, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_pv_session   ON page_views(session_id)`,
 	}
 	for _, t := range tables {
 		if _, err := DB.Exec(t); err != nil {

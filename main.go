@@ -42,6 +42,9 @@ func main() {
 
 	// 公开路由
 	r.POST("/api/login", handler.Login)
+	r.GET("/tracker.js", handler.ServeTrackerScript)
+	r.POST("/api/track/:siteId", handler.TrackPageView)
+	r.OPTIONS("/api/track/:siteId", handler.TrackPageView) // CORS preflight
 
 	// 需要认证的路由
 	auth := r.Group("/api")
@@ -143,6 +146,8 @@ func main() {
 		auth.POST("/stats/collect", handler.StatsTriggerCollect)
 		auth.POST("/stats/clear", handler.StatsClear)
 		auth.GET("/sites/:id/stats", handler.SiteStat)
+		auth.GET("/sites/:id/tracking/stats", handler.GetTrackingStats)
+		auth.GET("/sites/:id/tracking/code", handler.GetTrackingCode)
 	}
 
 	// 注册前端静态文件（嵌入式 SPA，NoRoute fallback → index.html）
