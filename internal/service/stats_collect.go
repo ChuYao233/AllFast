@@ -6,7 +6,9 @@ import (
 	"allfast/internal/provider"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -58,8 +60,18 @@ func (s *StatsCollectService) CollectAll() {
 }
 
 // TriggerNow 手动立即采集 + 触发今天 geo 采集
+// 若 dns_cache_zones 为空（DnsSync 还未完成），最多等待 15 秒
 func (s *StatsCollectService) TriggerNow() {
 	go func() {
+		for i := 0; i < 15; i++ {
+			var cnt int
+			database.DB.QueryRow("SELECT COUNT(*) FROM dns_cache_zones").Scan(&cnt)
+			if cnt > 0 {
+				break
+			}
+			log.Printf("[StatsCollect] 等待 DnsSync 完成 (%d/15)...", i+1)
+			time.Sleep(time.Second)
+		}
 		s.CollectAll()
 		today := time.Now().UTC().Format("2006-01-02")
 		s.collectGeoForDateRange(today, today)
@@ -104,7 +116,7 @@ func (s *StatsCollectService) collectForConfig(configID int64, providerName stri
 		return nil
 	}
 
-	zoneIDs := s.getStatsZoneIDs(configID, providerName)
+	zoneIDs := s.getStatsZoneIDs(configID, providerName, cfg)
 	if len(zoneIDs) == 0 {
 		return nil
 	}
@@ -135,36 +147,60 @@ func (s *StatsCollectService) collectForConfig(configID int64, providerName stri
 
 // backfillHistory 拉取历史数据，按天聚合写入 cdn_stats_daily
 // 先尝试完整范围，失败则依次降级（兼容 ESA 免费版仅支持 7 天数据）
+// CF CNAME 模式（zoneID 含 |）：Free 计划限制 httpRequestsAdaptiveGroups 每次 1 天，需逐天查询
 func (s *StatsCollectService) backfillHistory(sp provider.StatsProvider, configID int64, providerName string, cfg map[string]string, zoneID string, from, to time.Time) {
-	// 按天数降级：原始范围 → 14 天 → 7 天
-	attempts := []time.Duration{0, 14 * 24 * time.Hour, 7 * 24 * time.Hour}
 	var pts []model.StatPoint
 
-	success := false
-	for _, limit := range attempts {
-		queryFrom := from
-		if limit > 0 {
-			capped := to.Add(-limit)
-			if capped.After(from) {
-				queryFrom = capped
-			}
+	// CF CNAME 模式：逐天查询（Free 计划限制：每次 1 天 + 仅保留 8 天数据）
+	if strings.Contains(zoneID, "|") && providerName == "cloudflare" {
+		// Free 计划仅保留 8 天数据，限制为 7 天避免无效 API 调用
+		cfFrom := to.Add(-7 * 24 * time.Hour)
+		if cfFrom.Before(from) {
+			cfFrom = from
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-		var err error
-		pts, err = sp.GetTimeSeries(ctx, cfg, zoneID, queryFrom, to)
-		cancel()
-		if err == nil {
-			success = true
-			if limit > 0 && limit < to.Sub(from) {
-				log.Printf("[StatsCollect] zone %s 降级至 %dd 历史补拉成功", zoneID, int(limit.Hours()/24))
+		for day := cfFrom; day.Before(to); day = day.Add(24 * time.Hour) {
+			dayEnd := day.Add(24 * time.Hour)
+			if dayEnd.After(to) {
+				dayEnd = to
 			}
-			break
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			dayPts, err := sp.GetTimeSeries(ctx, cfg, zoneID, day, dayEnd)
+			cancel()
+			if err != nil {
+				log.Printf("[StatsCollect] CF CNAME %s 日期 %s 采集失败: %v", zoneID, day.Format("2006-01-02"), err)
+				continue
+			}
+			pts = append(pts, dayPts...)
 		}
-		log.Printf("[StatsCollect] backfill zone %s (from=%s) 失败: %v，尝试降级", zoneID, queryFrom.Format("2006-01-02"), err)
-	}
-	if !success {
-		log.Printf("[StatsCollect] zone %s 历史补拉全部降级后仍失败，跳过", zoneID)
-		return
+	} else {
+		// 其他提供商：按天数降级：原始范围 → 14 天 → 7 天
+		attempts := []time.Duration{0, 14 * 24 * time.Hour, 7 * 24 * time.Hour}
+		success := false
+		for _, limit := range attempts {
+			queryFrom := from
+			if limit > 0 {
+				capped := to.Add(-limit)
+				if capped.After(from) {
+					queryFrom = capped
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+			var err error
+			pts, err = sp.GetTimeSeries(ctx, cfg, zoneID, queryFrom, to)
+			cancel()
+			if err == nil {
+				success = true
+				if limit > 0 && limit < to.Sub(from) {
+					log.Printf("[StatsCollect] zone %s 降级至 %dd 历史补拉成功", zoneID, int(limit.Hours()/24))
+				}
+				break
+			}
+			log.Printf("[StatsCollect] backfill zone %s (from=%s) 失败: %v，尝试降级", zoneID, queryFrom.Format("2006-01-02"), err)
+		}
+		if !success {
+			log.Printf("[StatsCollect] zone %s 历史补拉全部降级后仍失败，跳过", zoneID)
+			return
+		}
 	}
 	if len(pts) == 0 {
 		// API 成功但该 zone 无流量数据，标记已采集避免重复尝试
@@ -298,7 +334,7 @@ func (s *StatsCollectService) collectGeoForDateRange(startDate, endDate string) 
 		if sp == nil {
 			continue
 		}
-		zoneIDs := s.getStatsZoneIDs(t.configID, t.provider)
+		zoneIDs := s.getStatsZoneIDs(t.configID, t.provider, t.cfg)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		for _, zoneID := range zoneIDs {
@@ -317,23 +353,26 @@ func (s *StatsCollectService) saveGeo(configID int64, providerName, zoneID strin
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, p := range pts {
+		code := strings.ToUpper(strings.TrimSpace(p.CountryCode))
+		if code == "" {
+			continue
+		}
 		database.DB.Exec(`
 			INSERT INTO cdn_stats_geo (config_id, provider, zone_id, stat_date, country_code, country_name, requests, bytes)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			ON CONFLICT (config_id, zone_id, stat_date, country_code) DO UPDATE
 			SET requests=EXCLUDED.requests, bytes=EXCLUDED.bytes`,
-			configID, providerName, zoneID, date, p.CountryCode, p.CountryName, p.Requests, p.Bytes,
+			configID, providerName, zoneID, date, code, code, p.Requests, p.Bytes,
 		)
 	}
 }
 
 // getStatsZoneIDs 获取用于流量统计的 zone/site ID 列表
-// - 过滤掉 alidns:xxx 等 DNS 专用 zone（含冒号的非标准 ID）
-// - Aliyun ESA 和 EdgeOne 的 CDN 站点 ID 从 deployments 补充（DNS 同步未必覆盖）
-func (s *StatsCollectService) getStatsZoneIDs(configID int64, providerName string) []string {
+// 完全基于 deployments（站点管理中部署的站点）确定要采集哪些 zone，
+// 不采集 CDN 账户下与 AllFast 无关的 zone。
+func (s *StatsCollectService) getStatsZoneIDs(configID int64, providerName string, cfg map[string]string) []string {
 	seen := map[string]bool{}
 	var ids []string
-
 	addUniq := func(id string) {
 		if id != "" && !seen[id] {
 			seen[id] = true
@@ -341,36 +380,117 @@ func (s *StatsCollectService) getStatsZoneIDs(configID int64, providerName strin
 		}
 	}
 
-	// 从 DNS 缓存表取（仅保留无冒号的标准 zone ID，过滤 alidns:xxx 格式）
-	rows, err := database.DB.Query(
-		"SELECT zone_id FROM dns_cache_zones WHERE config_id = $1 AND zone_id NOT LIKE '%:%'", configID,
-	)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var z string
-			rows.Scan(&z)
-			addUniq(z)
-		}
-	}
-
-	// 对于 Aliyun ESA 和 EdgeOne：CDN 站点 ID 存在 deployments.provider_site_id 中
-	// Cloudflare NS 模式 provider_site_id = zone ID（与 dns_cache_zones 重复），CNAME 模式为 hostname ID（不适合统计），跳过
-	if providerName == "aliyun" || providerName == "edgeone" {
-		deplRows, err := database.DB.Query(
-			`SELECT DISTINCT provider_site_id FROM deployments
-			 WHERE config_id = $1 AND provider = $2 AND provider_site_id != '' AND status NOT IN ('pending','error')`,
-			configID, providerName,
+	switch providerName {
+	case "aliyun":
+		// Aliyun ESA：返回 siteID:domain 格式，支持按域名过滤（和 EdgeOne 一致）
+		rows, err := database.DB.Query(
+			`SELECT d.provider_site_id, s.domain
+			 FROM deployments d JOIN sites s ON s.id = d.site_id
+			 WHERE d.config_id = $1 AND d.provider = 'aliyun'
+			   AND d.provider_site_id != ''
+			   AND d.status NOT IN ('pending','error')`,
+			configID,
 		)
-		if err == nil {
-			defer deplRows.Close()
-			for deplRows.Next() {
-				var z string
-				deplRows.Scan(&z)
-				addUniq(z)
+		if err != nil {
+			log.Printf("[StatsCollect] 阿里云 zone 查询失败: %v", err)
+		} else {
+			cnt := 0
+			for rows.Next() {
+				var siteID, domain string
+				rows.Scan(&siteID, &domain)
+				// 格式：siteID:domain
+				addUniq(siteID + ":" + domain)
+				cnt++
+			}
+			rows.Close()
+			if cnt == 0 {
+				// 调试：检查该 config_id 下所有部署
+				rows2, _ := database.DB.Query(
+					`SELECT id, site_id, provider, provider_site_id, status FROM deployments WHERE config_id = $1`,
+					configID,
+				)
+				var debugInfo []string
+				for rows2.Next() {
+					var id, siteID int64
+					var prov, psid, st string
+					rows2.Scan(&id, &siteID, &prov, &psid, &st)
+					debugInfo = append(debugInfo, fmt.Sprintf("id=%d site=%d prov=%s psid='%s' st=%s", id, siteID, prov, psid, st))
+				}
+				rows2.Close()
+				if len(debugInfo) == 0 {
+					log.Printf("[StatsCollect] 阿里云 configID=%d 无部署记录", configID)
+				} else {
+					log.Printf("[StatsCollect] 阿里云 configID=%d 部署详情: %v", configID, debugInfo)
+				}
 			}
 		}
+
+	case "edgeone":
+		// EdgeOne：返回 zoneID:domain 格式，支持按域名过滤
+		rows, err := database.DB.Query(
+			`SELECT d.provider_site_id, s.domain
+			 FROM deployments d JOIN sites s ON s.id = d.site_id
+			 WHERE d.config_id = $1 AND d.provider = 'edgeone'
+			   AND d.provider_site_id != '' AND d.provider_site_id NOT LIKE '%:%'
+			   AND d.status NOT IN ('pending','error')`,
+			configID,
+		)
+		if err == nil {
+			for rows.Next() {
+				var zoneID, domain string
+				rows.Scan(&zoneID, &domain)
+				if domain != "" {
+					addUniq(zoneID + ":" + domain)
+				} else {
+					addUniq(zoneID)
+				}
+			}
+			rows.Close()
+		}
+
+	case "cloudflare":
+		// NS 模式：provider_site_id 无短横线 = zone ID，直接用
+		nsRows, err := database.DB.Query(
+			`SELECT DISTINCT provider_site_id FROM deployments
+			 WHERE config_id = $1 AND provider = 'cloudflare'
+			   AND provider_site_id != '' AND provider_site_id NOT LIKE '%-%'
+			   AND status NOT IN ('pending','error')`,
+			configID,
+		)
+		if err == nil {
+			for nsRows.Next() {
+				var z string
+				nsRows.Scan(&z)
+				addUniq(z)
+			}
+			nsRows.Close()
+		}
+
+		// CNAME 模式（自定义主机名）：从 deploy_params 读取 zone_id
+		// 返回格式为 zoneID|hostname，让 CF stats provider 能按主机名过滤
+		cnameRows, err := database.DB.Query(
+			`SELECT s.domain, d.deploy_params
+			 FROM deployments d JOIN sites s ON s.id = d.site_id
+			 WHERE d.provider = 'cloudflare'
+			   AND d.provider_site_id LIKE '%-%'
+			   AND d.status NOT IN ('pending','error')`)
+		if err != nil {
+			log.Printf("[StatsCollect] CF CNAME 查询失败: %v", err)
+		} else {
+			for cnameRows.Next() {
+				var dom, paramsJSON string
+				cnameRows.Scan(&dom, &paramsJSON)
+				var params map[string]string
+				json.Unmarshal([]byte(paramsJSON), &params)
+				if zid := params["zone_id"]; zid != "" {
+					// 格式：zoneID|hostname，让 CF stats 按主机名过滤
+					addUniq(zid + "|" + dom)
+				}
+			}
+			cnameRows.Close()
+		}
 	}
 
+	log.Printf("[StatsCollect] configID=%d provider=%s 待采集 zone: %v", configID, providerName, ids)
 	return ids
 }

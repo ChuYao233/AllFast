@@ -13,6 +13,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -952,24 +953,23 @@ func (a *AliyunESAProvider) doRequest(ctx context.Context, cfg map[string]string
 		bodyReader = bytes.NewReader(bodyBytes)
 	}
 
-	// 构建查询字符串
-	queryParts := []string{}
-	sortedKeys := make([]string, 0, len(queryParams))
-	for k := range queryParams {
+	// 使用 url.Values 构建查询字符串
+	qValues := url.Values{}
+	for k, v := range queryParams {
 		if k == "Action" {
 			continue
 		}
-		sortedKeys = append(sortedKeys, k)
+		qValues.Set(k, v)
 	}
-	sort.Strings(sortedKeys)
-	for _, k := range sortedKeys {
-		queryParts = append(queryParts, fmt.Sprintf("%s=%s", k, queryParams[k]))
-	}
-	queryString := strings.Join(queryParts, "&")
+	// 签名用：完整 percent-encoding（%5B %5D %22 全编码）
+	canonicalQueryString := strings.ReplaceAll(qValues.Encode(), "+", "%20")
+	// URL 用：[ ] 不编码（字面量），" 保持 %22——避免 HTTP 请求行裸引号问题
+	urlQueryString := strings.ReplaceAll(canonicalQueryString, "%5B", "[")
+	urlQueryString = strings.ReplaceAll(urlQueryString, "%5D", "]")
 
 	requestURL := aliyunESAEndpoint
-	if queryString != "" {
-		requestURL = requestURL + "?" + queryString
+	if urlQueryString != "" {
+		requestURL = requestURL + "?" + urlQueryString
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, requestURL, bodyReader)
@@ -992,8 +992,10 @@ func (a *AliyunESAProvider) doRequest(ctx context.Context, cfg map[string]string
 		req.Header.Set("content-type", "application/json")
 	}
 
+	log.Printf("[AliyunESA DEBUG] doRequest %s %s", method, req.URL.String())
+
 	// ACS3-HMAC-SHA256 签名
-	signedHeaders, signature := a.sign(method, queryString, req.Header, bodyBytes, accessKeySecret)
+	signedHeaders, signature := a.sign(method, canonicalQueryString, req.Header, bodyBytes, accessKeySecret)
 
 	authHeader := fmt.Sprintf("ACS3-HMAC-SHA256 Credential=%s,SignedHeaders=%s,Signature=%s",
 		accessKeyID, signedHeaders, signature)

@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -22,10 +23,12 @@ func Login(c *gin.Context) {
 
 	var user model.User
 	var hashedPwd string
+	var totpSecret string
+	var totpEnabled int
 	err := database.DB.QueryRow(
-		"SELECT id, username, password, created_at FROM users WHERE username = $1",
+		"SELECT id, username, password, created_at, totp_secret, totp_enabled FROM users WHERE username = $1",
 		req.Username,
-	).Scan(&user.ID, &user.Username, &hashedPwd, &user.CreatedAt)
+	).Scan(&user.ID, &user.Username, &hashedPwd, &user.CreatedAt, &totpSecret, &totpEnabled)
 
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户名或密码错误"})
@@ -35,6 +38,19 @@ func Login(c *gin.Context) {
 	if err := bcrypt.CompareHashAndPassword([]byte(hashedPwd), []byte(req.Password)); err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户名或密码错误"})
 		return
+	}
+
+	// 密码验证通过后检查 TOTP
+	if totpEnabled == 1 {
+		if req.TotpCode == "" {
+			// 告知前端需要输入 TOTP 验证码
+			c.JSON(http.StatusOK, gin.H{"requires_totp": true})
+			return
+		}
+		if !totp.Validate(req.TotpCode, totpSecret) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "两步验证码错误"})
+			return
+		}
 	}
 
 	// 生成 JWT Token

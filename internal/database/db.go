@@ -202,11 +202,9 @@ func createTables() error {
 	return nil
 }
 
-// createDnsCacheTables DNS 缓存表（每次启动重建）
+// createDnsCacheTables DNS 缓存表（首次创建，保留已有数据跨重启持久化）
+// DnsSync 每次同步时已 DELETE per config_id + re-insert，无需在启动时清空
 func createDnsCacheTables() error {
-	DnsCacheDB.Exec("DROP TABLE IF EXISTS dns_cache_records")
-	DnsCacheDB.Exec("DROP TABLE IF EXISTS dns_cache_zones")
-	DnsCacheDB.Exec("DROP TABLE IF EXISTS dns_sync_status")
 
 	tables := []string{
 		`CREATE TABLE IF NOT EXISTS dns_cache_zones (
@@ -309,6 +307,14 @@ func createStatsTables() error {
 		if _, err := DB.Exec(t); err != nil {
 			return err
 		}
+	}
+	// 列迁移：为已存在的表添加新列（忽略"列已存在"错误）
+	migrations := []string{
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_enabled INTEGER NOT NULL DEFAULT 0`,
+	}
+	for _, m := range migrations {
+		DB.Exec(m) // 忽略错误（列已存在时会报错但不影响功能）
 	}
 	return nil
 }

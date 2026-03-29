@@ -117,11 +117,22 @@ func main() {
 		auth.DELETE("/provider-configs/:id", handler.DeleteProviderConfig)
 		auth.POST("/provider-configs/:id/test", handler.TestProviderConfig)
 
+		// 系统设置
+		auth.GET("/system/profile", handler.SystemGetProfile)
+		auth.PUT("/system/profile", handler.SystemUpdateProfile)
+		auth.POST("/system/totp/setup", handler.SystemTOTPSetup)
+		auth.POST("/system/totp/enable", handler.SystemTOTPEnable)
+		auth.DELETE("/system/totp", handler.SystemTOTPDisable)
+		auth.GET("/system/console-tls", handler.SystemGetConsoleTLSStatus)
+		auth.PUT("/system/console-tls", handler.SystemSaveConsoleTLS)
+		auth.DELETE("/system/console-tls", handler.SystemDeleteConsoleTLS)
+
 		// 流量统计
 		auth.GET("/stats/summary", handler.StatsSummary)
 		auth.GET("/stats/timeseries", handler.StatsTimeSeries)
 		auth.GET("/stats/geo", handler.StatsGeo)
 		auth.POST("/stats/collect", handler.StatsTriggerCollect)
+		auth.POST("/stats/clear", handler.StatsClear)
 		auth.GET("/sites/:id/stats", handler.SiteStat)
 	}
 

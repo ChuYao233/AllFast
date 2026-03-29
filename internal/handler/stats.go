@@ -4,8 +4,11 @@ import (
 	"allfast/internal/database"
 	"allfast/internal/model"
 	"allfast/internal/service"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -97,7 +100,7 @@ func StatsGeo(c *gin.Context) {
 	rows, err := database.DB.Query(`
 		SELECT country_code, country_name, SUM(requests), SUM(bytes)
 		FROM cdn_stats_geo
-		WHERE stat_date >= $1 AND stat_date < $2
+		WHERE stat_date >= $1 AND stat_date <= $2
 		GROUP BY country_code, country_name
 		ORDER BY SUM(requests) DESC`,
 		from.Format("2006-01-02"), to.Format("2006-01-02"),
@@ -181,27 +184,100 @@ func SiteStat(c *gin.Context) {
 	from, to := parseStatsRange(c.DefaultQuery("range", "30d"))
 	longRange := to.Sub(from) > 48*time.Hour
 
-	// 获取该站点所有 deployment 的 (config_id, provider_site_id)
-	rows, err := database.DB.Query(
-		`SELECT config_id, provider, provider_site_id FROM deployments
-		 WHERE site_id = $1 AND provider_site_id != '' AND status NOT IN ('pending','error')`,
-		siteID,
-	)
+	providerFilter := c.Query("provider") // 可选：cloudflare / edgeone / aliyun / ""
+
+	// 获取站点域名（CF zone 匹配需要）
+	var siteDomain string
+	database.DB.QueryRow("SELECT domain FROM sites WHERE id = $1", siteID).Scan(&siteDomain)
+
+	// 获取该站点所有 deployment
+	var rows *sql.Rows
+	var err error
+	if providerFilter != "" {
+		rows, err = database.DB.Query(
+			`SELECT config_id, provider, provider_site_id FROM deployments
+			 WHERE site_id = $1 AND provider = $2 AND status NOT IN ('pending','error')`,
+			siteID, providerFilter,
+		)
+	} else {
+		rows, err = database.DB.Query(
+			`SELECT config_id, provider, provider_site_id FROM deployments
+			 WHERE site_id = $1 AND status NOT IN ('pending','error')`,
+			siteID,
+		)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	defer rows.Close()
 
+	type deplRow struct {
+		configID         int64
+		provider, siteID string
+	}
+	var depls []deplRow
+	for rows.Next() {
+		var d deplRow
+		rows.Scan(&d.configID, &d.provider, &d.siteID)
+		depls = append(depls, d)
+	}
+	rows.Close()
+
+	// 解析各提供商真实的统计 zone ID
+	// - CF CNAME 模式：provider_site_id 是 hostname UUID（含短横线），需从 dns_cache_zones 按 zone_name 匹配
+	// - CF NS 模式：provider_site_id 即为 zone ID（32位纯十六进制）
+	// - EO / Aliyun：provider_site_id 即为 CDN 站点 ID
 	type zoneKey struct {
 		configID         int64
 		provider, zoneID string
 	}
+	seen := map[string]bool{}
 	var zones []zoneKey
-	for rows.Next() {
-		var z zoneKey
-		rows.Scan(&z.configID, &z.provider, &z.zoneID)
-		zones = append(zones, z)
+	addZone := func(configID int64, provider, zoneID string) {
+		k := fmt.Sprintf("%d:%s", configID, zoneID)
+		if zoneID != "" && !seen[k] {
+			seen[k] = true
+			zones = append(zones, zoneKey{configID, provider, zoneID})
+		}
+	}
+
+	for _, d := range depls {
+		switch d.provider {
+		case "cloudflare":
+			if !strings.Contains(d.siteID, "-") && d.siteID != "" {
+				// NS 模式：provider_site_id 就是 zone ID
+				addZone(d.configID, "cloudflare", d.siteID)
+			} else {
+				// CNAME 模式：采集时 zone_id 格式为 "zoneID|hostname"
+				// 从 deploy_params 读取 zone_id，拼接成 zoneID|siteDomain
+				if siteDomain != "" {
+					var paramsJSON string
+					database.DB.QueryRow(
+						`SELECT deploy_params FROM deployments WHERE site_id = $1 AND config_id = $2 AND provider = 'cloudflare'`,
+						siteID, d.configID,
+					).Scan(&paramsJSON)
+					var params map[string]string
+					json.Unmarshal([]byte(paramsJSON), &params)
+					if zid := params["zone_id"]; zid != "" {
+						addZone(d.configID, "cloudflare", zid+"|"+siteDomain)
+					}
+				}
+			}
+		case "edgeone":
+			// EdgeOne：采集时 zone_id 格式为 "zoneID:domain"
+			if d.siteID != "" && siteDomain != "" {
+				addZone(d.configID, "edgeone", d.siteID+":"+siteDomain)
+			} else if d.siteID != "" {
+				addZone(d.configID, "edgeone", d.siteID)
+			}
+		case "aliyun", "aliyun_esa":
+			// Aliyun ESA：采集时 zone_id 格式为 "siteID:domain"
+			if d.siteID != "" && siteDomain != "" {
+				addZone(d.configID, d.provider, d.siteID+":"+siteDomain)
+			} else if d.siteID != "" {
+				addZone(d.configID, d.provider, d.siteID)
+			}
+		}
 	}
 
 	if len(zones) == 0 {
@@ -212,14 +288,10 @@ func SiteStat(c *gin.Context) {
 		return
 	}
 
-	// 构建 zone_id IN (...) 参数
+	// 构建 zone_id IN (...) 参数（addZone 已保证唯一）
 	zoneIDs := make([]string, 0, len(zones))
-	seen := map[string]bool{}
 	for _, z := range zones {
-		if !seen[z.zoneID] {
-			seen[z.zoneID] = true
-			zoneIDs = append(zoneIDs, z.zoneID)
-		}
+		zoneIDs = append(zoneIDs, z.zoneID)
 	}
 
 	// 构建 $1,$2,... 占位符
@@ -330,6 +402,14 @@ func SiteStat(c *gin.Context) {
 func StatsTriggerCollect(c *gin.Context) {
 	service.StatsCollect.TriggerNow()
 	c.JSON(http.StatusOK, gin.H{"message": "采集任务已触发"})
+}
+
+// StatsClear POST /api/stats/clear — 清空所有统计缓存（临时调试用）
+func StatsClear(c *gin.Context) {
+	database.DB.Exec("DELETE FROM cdn_stats_daily")
+	database.DB.Exec("DELETE FROM cdn_stats_raw")
+	database.DB.Exec("DELETE FROM cdn_stats_geo")
+	c.JSON(http.StatusOK, gin.H{"message": "统计数据已清空"})
 }
 
 // parseStatsRange 将范围字符串转为 from/to 时间

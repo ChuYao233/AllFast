@@ -99,6 +99,7 @@ type ProviderConfig struct {
 type LoginRequest struct {
 	Username string `json:"username" binding:"required"`
 	Password string `json:"password" binding:"required"`
+	TotpCode string `json:"totp_code"`
 }
 
 type LoginResponse struct {

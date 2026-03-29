@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -14,10 +15,18 @@ func init() {
 }
 
 // GetTimeSeries 腾讯云 EdgeOne DescribeTimingL7AnalysisData
+// zoneID 格式可以是纯 zone ID 或 "zoneID:domain"（按域名过滤）
 func (e *EdgeOneProvider) GetTimeSeries(ctx context.Context, cfg map[string]string, zoneID string, from, to time.Time) ([]model.StatPoint, error) {
 	interval := "hour"
 	if to.Sub(from) > 72*time.Hour {
 		interval = "day"
+	}
+
+	// 解析 zoneID:domain 格式
+	var domain string
+	if idx := strings.Index(zoneID, ":"); idx > 0 {
+		domain = zoneID[idx+1:]
+		zoneID = zoneID[:idx]
 	}
 
 	params := map[string]interface{}{
@@ -26,6 +35,12 @@ func (e *EdgeOneProvider) GetTimeSeries(ctx context.Context, cfg map[string]stri
 		"ZoneIds":     []string{zoneID},
 		"MetricNames": []string{"l7Flow_outFlux", "l7Flow_request"},
 		"Interval":    interval,
+	}
+	// 按域名过滤（EdgeOne 使用 Key/Operator/Value 格式）
+	if domain != "" {
+		params["Filters"] = []map[string]interface{}{
+			{"Key": "domain", "Operator": "equals", "Value": []string{domain}},
+		}
 	}
 
 	body, err := e.doRequest(ctx, cfg, "DescribeTimingL7AnalysisData", params)
@@ -95,17 +110,29 @@ func (e *EdgeOneProvider) GetTimeSeries(ctx context.Context, cfg map[string]stri
 }
 
 // GetGeoDistribution 腾讯云 EdgeOne DescribeTopL7AnalysisData（按国家/地区）
+// zoneID 格式可以是纯 zone ID 或 "zoneID:domain"（按域名过滤）
 func (e *EdgeOneProvider) GetGeoDistribution(ctx context.Context, cfg map[string]string, zoneID string, from, to time.Time) ([]model.GeoPoint, error) {
+	// 解析 zoneID:domain 格式
+	var domain string
+	if idx := strings.Index(zoneID, ":"); idx > 0 {
+		domain = zoneID[idx+1:]
+		zoneID = zoneID[:idx]
+	}
+
+	// MetricName 格式为 {指标}_{维度}，l7Flow_request_country = 按国家的请求数
 	params := map[string]interface{}{
 		"StartTime":  from.UTC().Format("2006-01-02T15:04:05Z"),
 		"EndTime":    to.UTC().Format("2006-01-02T15:04:05Z"),
 		"ZoneIds":    []string{zoneID},
-		"MetricName": "l7Flow_request",
+		"MetricName": "l7Flow_request_country",
+		"Interval":   "day",
 		"Limit":      100,
-		// Filters 指定按 country 维度聚合，否则 API 不知道分组维度会报 InvalidParameter
-		"Filters": []map[string]interface{}{
-			{"Key": "country", "Operator": "include", "Value": []string{"all"}},
-		},
+	}
+	// 按域名过滤（EdgeOne 使用 Key/Operator/Value 格式）
+	if domain != "" {
+		params["Filters"] = []map[string]interface{}{
+			{"Key": "domain", "Operator": "equals", "Value": []string{domain}},
+		}
 	}
 
 	body, err := e.doRequest(ctx, cfg, "DescribeTopL7AnalysisData", params)
@@ -113,13 +140,15 @@ func (e *EdgeOneProvider) GetGeoDistribution(ctx context.Context, cfg map[string
 		return nil, err
 	}
 
+	// 实际响应结构：Data[].DetailData[].{Key(国家名), Value(请求数)}
 	var resp struct {
 		Response struct {
 			Data []struct {
-				TopList []struct {
+				TypeKey    string `json:"TypeKey"`
+				DetailData []struct {
 					Key   string  `json:"Key"`
 					Value float64 `json:"Value"`
-				} `json:"TopList"`
+				} `json:"DetailData"`
 			} `json:"Data"`
 			Error *struct {
 				Code    string `json:"Code"`
@@ -136,8 +165,8 @@ func (e *EdgeOneProvider) GetGeoDistribution(ctx context.Context, cfg map[string
 
 	var pts []model.GeoPoint
 	for _, d := range resp.Response.Data {
-		for _, item := range d.TopList {
-			if item.Key == "" || item.Key == "Unknown" {
+		for _, item := range d.DetailData {
+			if item.Key == "" || item.Key == "Unknown" || item.Key == "-" {
 				continue
 			}
 			pts = append(pts, model.GeoPoint{
