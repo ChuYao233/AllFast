@@ -145,6 +145,9 @@ func main() {
 		auth.GET("/sites/:id/stats", handler.SiteStat)
 	}
 
+	// 注册前端静态文件（嵌入式 SPA，NoRoute fallback → index.html）
+	registerStaticFiles(r)
+
 	// 启动后台 DNS 缓存同步（每15分钟）
 	service.DnsSync.StartBackgroundSync()
 

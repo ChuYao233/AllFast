@@ -1,1 +1,5 @@
 config.yaml
+# 前端构建产物（vite build 输出）
+/web/*
+!/web/placeholder.txt
+!/web/.gitkeep
