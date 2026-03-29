@@ -5,6 +5,7 @@ import (
 	"allfast/internal/model"
 	"allfast/internal/provider"
 	"allfast/internal/service"
+	"allfast/internal/util"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -95,7 +96,7 @@ func RemoveSiteDeployment(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "接入已移除"})
 
 	// 异步清理提供商侧资源和 DNS 记录（不阻塞请求）
-	go func() {
+	util.SafeGo(func() {
 		if dep.ProviderSiteID != "" {
 			if p, err := provider.Get(dep.Provider); err == nil {
 				cfg := getProviderCfgByID(dep.ConfigID)
@@ -110,7 +111,7 @@ func RemoveSiteDeployment(c *gin.Context) {
 		if dep.CDNCname != "" {
 			cleanupDnsRecordsForCnames(domain, []string{dep.CDNCname})
 		}
-	}()
+	})
 }
 
 func validateProviderUniquePerSite(siteID int64, configIDs []int64) error {
@@ -369,7 +370,7 @@ func RedeployDeployment(c *gin.Context) {
 	deployParamsMap := map[string]map[string]string{
 		fmt.Sprintf("%d", dep.ConfigID): params,
 	}
-	go deploySvc.DeploySite(context.Background(), siteIDInt, []int64{dep.ConfigID}, deployParamsMap)
+	util.SafeGo(func() { deploySvc.DeploySite(context.Background(), siteIDInt, []int64{dep.ConfigID}, deployParamsMap) })
 
 	c.JSON(http.StatusOK, gin.H{"message": "已开始重新部署"})
 }
@@ -445,7 +446,7 @@ func UpdateDeploymentOrigin(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "回源配置已更新"})
 
 	// 异步同步到 CDN 提供商
-	go func() {
+	util.SafeGo(func() {
 		if dep.ProviderSiteID == "" || domain == "" {
 			return
 		}
@@ -484,7 +485,7 @@ func UpdateDeploymentOrigin(c *gin.Context) {
 		} else {
 			log.Printf("[UpdateOrigin] %s 回源配置同步成功", dep.Provider)
 		}
-	}()
+	})
 }
 
 // parseID 解析字符串ID为int64

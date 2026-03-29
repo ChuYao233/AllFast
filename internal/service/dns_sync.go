@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -28,6 +29,11 @@ var DnsSync = &DnsSyncService{}
 // StartBackgroundSync 启动后台定时同步
 func (s *DnsSyncService) StartBackgroundSync() {
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[DnsSync] goroutine panic 已恢复: %v\n%s", r, debug.Stack())
+			}
+		}()
 		// 启动后先等 10 秒让数据库就绪
 		time.Sleep(10 * time.Second)
 		log.Println("[DnsSync] 后台同步任务启动，间隔15分钟")

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -12,11 +14,18 @@ import (
 type Config struct {
 	Server   ServerConfig   `yaml:"server"`
 	Database DatabaseConfig `yaml:"database"`
+	Security SecurityConfig `yaml:"security"`
 }
 
 // ServerConfig 服务配置
 type ServerConfig struct {
 	Port int `yaml:"port"`
+}
+
+// SecurityConfig 安全相关配置
+type SecurityConfig struct {
+	JWTSecret      string   `yaml:"jwt_secret"`
+	AllowedOrigins []string `yaml:"allowed_origins"`
 }
 
 // DatabaseConfig PostgreSQL 配置
@@ -68,6 +77,14 @@ func Load(path string) error {
 	}
 	if C.Database.MaxIdleConns <= 0 {
 		C.Database.MaxIdleConns = 5
+	}
+	// JWT secret：未配置时随机生成（每次重启会使已登录 token 失效，建议在 config.yaml 中固定）
+	if C.Security.JWTSecret == "" {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err == nil {
+			C.Security.JWTSecret = hex.EncodeToString(b)
+			log.Println("[警告] jwt_secret 未配置，已随机生成；重启后所有 token 失效，建议在 config.yaml 中设置固定值")
+		}
 	}
 
 	log.Printf("配置加载完成: PG=%s:%d/%s, 服务端口=%d", C.Database.Host, C.Database.Port, C.Database.DBName, C.Server.Port)

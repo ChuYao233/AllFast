@@ -1,8 +1,8 @@
 package handler
 
 import (
+	"allfast/internal/config"
 	"allfast/internal/database"
-	"allfast/internal/middleware"
 	"allfast/internal/model"
 	"net/http"
 	"time"
@@ -36,6 +36,8 @@ func Login(c *gin.Context) {
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(hashedPwd), []byte(req.Password)); err != nil {
+		// 固定时间响应，防止逆向或 timing 攻击推断用户名是否存在
+		time.Sleep(500 * time.Millisecond)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户名或密码错误"})
 		return
 	}
@@ -60,7 +62,7 @@ func Login(c *gin.Context) {
 		"exp":      time.Now().Add(24 * time.Hour).Unix(),
 	})
 
-	tokenStr, err := token.SignedString(middleware.JWTSecret)
+	tokenStr, err := token.SignedString([]byte(config.C.Security.JWTSecret))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "生成Token失败"})
 		return

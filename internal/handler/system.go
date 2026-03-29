@@ -1,8 +1,8 @@
 package handler
 
 import (
+	"allfast/internal/config"
 	"allfast/internal/database"
-	"allfast/internal/middleware"
 	"net/http"
 	"os"
 	"strings"
@@ -102,7 +102,7 @@ func SystemUpdateProfile(c *gin.Context) {
 		"username": newUsername,
 		"exp":      time.Now().Add(24 * time.Hour).Unix(),
 	})
-	tokenStr, _ := token.SignedString(middleware.JWTSecret)
+	tokenStr, _ := token.SignedString([]byte(config.C.Security.JWTSecret))
 	c.JSON(http.StatusOK, gin.H{"message": "保存成功", "token": tokenStr, "username": newUsername})
 }
 

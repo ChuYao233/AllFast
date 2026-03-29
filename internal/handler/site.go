@@ -4,6 +4,7 @@ import (
 	"allfast/internal/database"
 	"allfast/internal/model"
 	"allfast/internal/provider"
+	"allfast/internal/util"
 	"context"
 	"encoding/json"
 	"log"
@@ -144,7 +145,7 @@ func CreateSite(c *gin.Context) {
 		database.DB.Exec("UPDATE sites SET status = 'deploying', updated_at = $1 WHERE id = $2", now, id)
 		site.Status = "deploying"
 		// 后台并发部署，不阻塞当前请求
-		go deploySvc.DeploySite(context.Background(), id, req.ConfigIDs, req.DeployParams)
+		util.SafeGo(func() { deploySvc.DeploySite(context.Background(), id, req.ConfigIDs, req.DeployParams) })
 	}
 
 	c.JSON(http.StatusCreated, gin.H{"site": site})
@@ -358,12 +359,14 @@ func UpdateSite(c *gin.Context) {
 	}
 
 	// 异步同步回源配置到各 CDN 提供商
-	go syncOriginToProviders(siteID, model.OriginConfig{
-		Origin:         req.Origin,
-		OriginProtocol: req.OriginProtocol,
-		HTTPPort:       req.HTTPPort,
-		HTTPSPort:      req.HTTPSPort,
-		OriginHost:     req.OriginHost,
+	util.SafeGo(func() {
+		syncOriginToProviders(siteID, model.OriginConfig{
+			Origin:         req.Origin,
+			OriginProtocol: req.OriginProtocol,
+			HTTPPort:       req.HTTPPort,
+			HTTPSPort:      req.HTTPSPort,
+			OriginHost:     req.OriginHost,
+		})
 	})
 
 	c.JSON(http.StatusOK, gin.H{"message": "站点设置已更新"})
@@ -477,7 +480,7 @@ func DeleteSite(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "站点已删除"})
 
 	// 异步清理 CDN 侧资源和 DNS 记录（不阻塞请求）
-	go func() {
+	util.SafeGo(func() {
 		var allCnames []string
 		ctx := context.Background()
 		for _, d := range deps {
@@ -504,7 +507,7 @@ func DeleteSite(c *gin.Context) {
 			}
 		}
 		cleanupDnsRecordsForCnames(domain, allCnames)
-	}()
+	})
 }
 
 // ToggleAutoSync PUT /api/sites/:id/auto-sync — 切换自动同步配置开关

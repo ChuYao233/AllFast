@@ -9,6 +9,8 @@ import (
 	"allfast/internal/service"
 	"fmt"
 	"log"
+	"net/http"
+	"time"
 
 	// 注册各 CDN 提供商（init() 自动注册）
 	_ "allfast/internal/provider/aliyun"
@@ -150,7 +152,14 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", config.C.Server.Port)
 	log.Printf("AllFast CDN聚合部署平台启动在 %s", addr)
-	if err := r.Run(addr); err != nil {
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      r,
+		ReadTimeout:  30 * time.Second,  // 请求读取超时
+		WriteTimeout: 120 * time.Second, // 响应写入超时（异步接口等待时间较长）
+		IdleTimeout:  60 * time.Second,  // 空闲连接超时
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("服务启动失败: %v", err)
 	}
 }

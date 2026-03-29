@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,11 @@ var StatsCollect = &StatsCollectService{}
 // StartBackgroundCollect 启动后台采集（每15分钟一次）+ 每天0点聚合
 func (s *StatsCollectService) StartBackgroundCollect() {
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[StatsCollect] goroutine panic 已恢复: %v\n%s", r, debug.Stack())
+			}
+		}()
 		time.Sleep(20 * time.Second)
 		log.Println("[StatsCollect] 后台采集任务启动")
 		s.CollectAll()
@@ -51,6 +57,11 @@ func (s *StatsCollectService) CollectAll() {
 		wg.Add(1)
 		go func(t collectTask) {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[StatsCollect] 配置 ID=%d panic 已恢复: %v", t.configID, r)
+				}
+			}()
 			if err := s.collectForConfig(t.configID, t.provider, t.cfg); err != nil {
 				log.Printf("[StatsCollect] 配置 ID=%d 采集失败: %v", t.configID, err)
 			}
@@ -63,6 +74,11 @@ func (s *StatsCollectService) CollectAll() {
 // 若 dns_cache_zones 为空（DnsSync 还未完成），最多等待 15 秒
 func (s *StatsCollectService) TriggerNow() {
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[StatsCollect] TriggerNow panic 已恢复: %v", r)
+			}
+		}()
 		for i := 0; i < 15; i++ {
 			var cnt int
 			database.DB.QueryRow("SELECT COUNT(*) FROM dns_cache_zones").Scan(&cnt)

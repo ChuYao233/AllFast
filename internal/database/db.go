@@ -4,6 +4,7 @@ import (
 	"allfast/internal/config"
 	"database/sql"
 	"log"
+	"time"
 
 	_ "github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
@@ -23,6 +24,8 @@ func Init() error {
 	}
 	DB.SetMaxOpenConns(config.C.Database.MaxOpenConns)
 	DB.SetMaxIdleConns(config.C.Database.MaxIdleConns)
+	DB.SetConnMaxLifetime(30 * time.Minute) // 防止连接被 NAT/防火墙静默关闭
+	DB.SetConnMaxIdleTime(10 * time.Minute)
 	if err = DB.Ping(); err != nil {
 		return err
 	}
@@ -191,9 +194,19 @@ func createTables() error {
 		}
 	}
 
-	// 增量迁移：为已有表添加新列（幂等，列已存在时静默跳过）
+	// 增量迁移：新列 + 关键索引（幂等，已存在时静默跳过）
 	migrations := []string{
 		`ALTER TABLE deployments ADD COLUMN IF NOT EXISTS deploy_log TEXT DEFAULT ''`,
+		// 关键查询索引
+		`CREATE INDEX IF NOT EXISTS idx_deployments_site_id ON deployments(site_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_deployments_config_id ON deployments(config_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_deployments_status ON deployments(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_dns_records_site_id ON dns_records(site_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_dns_records_deployment_id ON dns_records(deployment_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_certificates_site_id ON certificates(site_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_certificates_deployment_id ON certificates(deployment_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_cdn_stats_raw_lookup ON cdn_stats_raw(config_id, period_start)`,
+		`CREATE INDEX IF NOT EXISTS idx_cdn_stats_daily_lookup ON cdn_stats_daily(config_id, stat_date)`,
 	}
 	for _, m := range migrations {
 		DB.Exec(m)

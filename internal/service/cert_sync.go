@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"runtime/debug"
 	"time"
 )
 
@@ -19,6 +20,11 @@ const certSyncInterval = 5 * time.Minute
 // StartBackgroundSync 启动后台定时同步证书状态
 func (s *CertSyncService) StartBackgroundSync() {
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[CertSync] goroutine panic 已恢复: %v\n%s", r, debug.Stack())
+			}
+		}()
 		// 启动后等 15 秒让数据库和其他服务就绪
 		time.Sleep(15 * time.Second)
 		log.Println("[CertSync] 后台证书状态同步任务启动，间隔5分钟")
