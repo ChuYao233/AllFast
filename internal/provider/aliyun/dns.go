@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -707,7 +708,7 @@ func (a *AliyunESAProvider) doAlidnsRequest(ctx context.Context, cfg map[string]
 		bodyReader = bytes.NewReader(bodyBytes)
 	}
 
-	// 构建查询字符串（跳过 Action）
+	// 构建查询字符串（跳过 Action），key/value 按 RFC 3986 percent-encode，与 ACS3 签名规范一致
 	queryParts := []string{}
 	sortedKeys := make([]string, 0, len(queryParams))
 	for k := range queryParams {
@@ -718,7 +719,8 @@ func (a *AliyunESAProvider) doAlidnsRequest(ctx context.Context, cfg map[string]
 	}
 	sort.Strings(sortedKeys)
 	for _, k := range sortedKeys {
-		queryParts = append(queryParts, fmt.Sprintf("%s=%s", k, queryParams[k]))
+		// url.QueryEscape 会将 @ → %40、空格 → +；对 DNS 参数值已够用
+		queryParts = append(queryParts, url.QueryEscape(k)+"="+url.QueryEscape(queryParams[k]))
 	}
 	queryString := strings.Join(queryParts, "&")
 

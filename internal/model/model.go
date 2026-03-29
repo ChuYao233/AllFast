@@ -258,6 +258,7 @@ type DnsProviderFeatures struct {
 	HasWeight    bool   `json:"has_weight"`              // 是否支持负载均衡权重
 	HasRemark    bool   `json:"has_remark"`              // 是否支持备注
 	MainlandLine string `json:"mainland_line,omitempty"` // 中国大陆线路值（空=不支持大陆/海外分流）
+	MinTTL       int    `json:"min_ttl,omitempty"`       // 该套餐允许的最小 TTL（秒），0/1=无限制
 }
 
 // ===== SSL 证书管理 =====

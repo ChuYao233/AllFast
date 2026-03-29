@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -41,19 +40,19 @@ func (c *CloudflareProvider) GetTimeSeries(ctx context.Context, cfg map[string]s
 
 	var gqlQuery string
 
-	// 自定义主机名模式：使用 httpRequestsAdaptiveGroups + clientRequestHTTPHost
+	// 自定义主机名模式：使用 httpRequestsAdaptiveGroups + clientRequestHTTPHost + cacheStatus 维度
 	if hostname != "" {
 		if useDailyGranularity {
 			gqlQuery = fmt.Sprintf(`{
   viewer {
     zones(filter: {zoneTag: %q}) {
       httpRequestsAdaptiveGroups(
-        limit: 366,
+        limit: 3000,
         filter: {date_geq: %q, date_lt: %q, clientRequestHTTPHost: %q, requestSource: "eyeball"}
         orderBy: [date_ASC]
       ) {
         sum { visits edgeResponseBytes }
-        dimensions { date }
+        dimensions { date cacheStatus }
       }
     }
   }
@@ -63,12 +62,12 @@ func (c *CloudflareProvider) GetTimeSeries(ctx context.Context, cfg map[string]s
   viewer {
     zones(filter: {zoneTag: %q}) {
       httpRequestsAdaptiveGroups(
-        limit: 168,
+        limit: 2000,
         filter: {datetime_geq: %q, datetime_lt: %q, clientRequestHTTPHost: %q, requestSource: "eyeball"}
         orderBy: [datetimeHour_ASC]
       ) {
         sum { visits edgeResponseBytes }
-        dimensions { datetimeHour }
+        dimensions { datetimeHour cacheStatus }
       }
     }
   }
@@ -190,13 +189,26 @@ func (c *CloudflareProvider) GetTimeSeries(ctx context.Context, cfg map[string]s
 	return pts, nil
 }
 
+// cfCacheHit 判断 cacheStatus 是否算缓存命中
+func cfCacheHit(status string) bool {
+	switch status {
+	case "hit", "revalidated", "updating", "stale":
+		return true
+	}
+	return false
+}
+
 // parseAdaptiveGroupsResponse 解析 httpRequestsAdaptiveGroups 响应（用于自定义主机名）
+// 响应行按 (时间, cacheStatus) 分组，Go 端按时间聚合并统计缓存命中数
 func (c *CloudflareProvider) parseAdaptiveGroupsResponse(ctx context.Context, cfg map[string]string, gqlQuery string, useDailyGranularity bool) ([]model.StatPoint, error) {
 	body, err := c.doGraphQL(ctx, cfg, gqlQuery)
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("[Cloudflare] AdaptiveGroups 响应: %s", string(body))
+
+	type aggRow struct {
+		reqs, bytes, cached int64
+	}
 
 	if useDailyGranularity {
 		var resp struct {
@@ -209,7 +221,8 @@ func (c *CloudflareProvider) parseAdaptiveGroupsResponse(ctx context.Context, cf
 								EdgeResponseBytes int64 `json:"edgeResponseBytes"`
 							} `json:"sum"`
 							Dimensions struct {
-								Date string `json:"date"`
+								Date        string `json:"date"`
+								CacheStatus string `json:"cacheStatus"`
 							} `json:"dimensions"`
 						} `json:"httpRequestsAdaptiveGroups"`
 					} `json:"zones"`
@@ -219,16 +232,26 @@ func (c *CloudflareProvider) parseAdaptiveGroupsResponse(ctx context.Context, cf
 		if err := json.Unmarshal(body, &resp); err != nil {
 			return nil, fmt.Errorf("解析 AdaptiveGroups 日粒度响应失败: %w", err)
 		}
-		var pts []model.StatPoint
+		agg := map[string]*aggRow{}
 		for _, z := range resp.Data.Viewer.Zones {
 			for _, g := range z.Groups {
-				t, _ := time.Parse("2006-01-02", g.Dimensions.Date)
-				pts = append(pts, model.StatPoint{
-					Time:     t,
-					Requests: g.Sum.Visits,
-					Bytes:    g.Sum.EdgeResponseBytes,
-				})
+				d := g.Dimensions.Date
+				if agg[d] == nil {
+					agg[d] = &aggRow{}
+				}
+				agg[d].reqs += g.Sum.Visits
+				agg[d].bytes += g.Sum.EdgeResponseBytes
+				if cfCacheHit(g.Dimensions.CacheStatus) {
+					agg[d].cached += g.Sum.Visits
+				}
 			}
+		}
+		var pts []model.StatPoint
+		for dateStr, a := range agg {
+			t, _ := time.Parse("2006-01-02", dateStr)
+			pts = append(pts, model.StatPoint{
+				Time: t, Requests: a.reqs, Bytes: a.bytes, CachedRequests: a.cached,
+			})
 		}
 		return pts, nil
 	}
@@ -244,6 +267,7 @@ func (c *CloudflareProvider) parseAdaptiveGroupsResponse(ctx context.Context, cf
 						} `json:"sum"`
 						Dimensions struct {
 							DatetimeHour string `json:"datetimeHour"`
+							CacheStatus  string `json:"cacheStatus"`
 						} `json:"dimensions"`
 					} `json:"httpRequestsAdaptiveGroups"`
 				} `json:"zones"`
@@ -253,16 +277,26 @@ func (c *CloudflareProvider) parseAdaptiveGroupsResponse(ctx context.Context, cf
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("解析 AdaptiveGroups 小时粒度响应失败: %w", err)
 	}
-	var pts []model.StatPoint
+	agg := map[string]*aggRow{}
 	for _, z := range resp.Data.Viewer.Zones {
 		for _, g := range z.Groups {
-			t, _ := time.Parse("2006-01-02T15:00:00Z", g.Dimensions.DatetimeHour)
-			pts = append(pts, model.StatPoint{
-				Time:     t,
-				Requests: g.Sum.Visits,
-				Bytes:    g.Sum.EdgeResponseBytes,
-			})
+			h := g.Dimensions.DatetimeHour
+			if agg[h] == nil {
+				agg[h] = &aggRow{}
+			}
+			agg[h].reqs += g.Sum.Visits
+			agg[h].bytes += g.Sum.EdgeResponseBytes
+			if cfCacheHit(g.Dimensions.CacheStatus) {
+				agg[h].cached += g.Sum.Visits
+			}
 		}
+	}
+	var pts []model.StatPoint
+	for hourStr, a := range agg {
+		t, _ := time.Parse("2006-01-02T15:00:00Z", hourStr)
+		pts = append(pts, model.StatPoint{
+			Time: t, Requests: a.reqs, Bytes: a.bytes, CachedRequests: a.cached,
+		})
 	}
 	return pts, nil
 }

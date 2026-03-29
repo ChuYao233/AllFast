@@ -99,6 +99,24 @@ func DnsListRecords(c *gin.Context) {
 	}
 
 	features := dnsProv.Features(zoneID)
+	// 根据 zone 套餐限制最小 TTL
+	if providerName == "aliyun" && strings.HasPrefix(zoneID, "alidns:") {
+		zones, _ := service.DnsSync.GetCachedZones(cid)
+		for _, z := range zones {
+			if z.ID == zoneID {
+				switch z.PlanName {
+				case "企业标准版", "企业旗舰版", "企业至尊版":
+					features.MinTTL = 60
+				default:
+					features.MinTTL = 600
+				}
+				break
+			}
+		}
+		if features.MinTTL == 0 {
+			features.MinTTL = 600 // 未能匹配时默认免费版限制
+		}
+	}
 	meta := gin.H{
 		"record_types": dnsProv.SupportedRecordTypes(),
 		"lines":        dnsProv.SupportedLines(),
