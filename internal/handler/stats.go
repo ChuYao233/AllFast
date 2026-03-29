@@ -175,6 +175,13 @@ func StatsSummary(c *gin.Context) {
 		summary.AvgHitRate = float64(totalCached) / float64(summary.TotalRequests)
 	}
 
+	// 站点数
+	database.DB.QueryRow("SELECT COUNT(*) FROM sites").Scan(&summary.SitesTotal)
+	database.DB.QueryRow("SELECT COUNT(*) FROM sites WHERE status = 'active'").Scan(&summary.SitesUp)
+
+	// DNS 托管域名数（dns_cache_zones 表去重 zone_name）
+	database.DB.QueryRow("SELECT COUNT(DISTINCT zone_name) FROM dns_cache_zones").Scan(&summary.ManagedDomains)
+
 	c.JSON(http.StatusOK, summary)
 }
 

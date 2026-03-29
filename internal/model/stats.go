@@ -21,11 +21,14 @@ type GeoPoint struct {
 
 // StatsSummary 汇总卡片数据
 type StatsSummary struct {
-	TotalRequests int64   `json:"total_requests"`
-	TotalBytes    int64   `json:"total_bytes"`
-	AvgHitRate    float64 `json:"avg_hit_rate"` // 缓存命中率 0-1
-	Providers     int     `json:"providers"`
-	Zones         int     `json:"zones"`
+	TotalRequests  int64   `json:"total_requests"`
+	TotalBytes     int64   `json:"total_bytes"`
+	AvgHitRate     float64 `json:"avg_hit_rate"` // 缓存命中率 0-1
+	Providers      int     `json:"providers"`
+	Zones          int     `json:"zones"`
+	SitesUp        int     `json:"sites_up"`        // 状态为 active 的站点数
+	SitesTotal     int     `json:"sites_total"`     // 总站点数
+	ManagedDomains int     `json:"managed_domains"` // DNS 托管域名数（dns_cache_zones）
 }
 
 // StatsQueryRange 查询时间范围标识
