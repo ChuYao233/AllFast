@@ -109,7 +109,7 @@ type LoginResponse struct {
 
 type CreateSiteRequest struct {
 	Domain         string                       `json:"domain" binding:"required"`
-	Origin         string                       `json:"origin" binding:"required"`
+	Origin         string                       `json:"origin"`          // 可选，每个 deployment 可独立配置
 	OriginProtocol string                       `json:"origin_protocol"` // follow / http / https，默认 follow
 	HTTPPort       int                          `json:"http_port"`       // HTTP回源端口，默认80
 	HTTPSPort      int                          `json:"https_port"`      // HTTPS回源端口，默认443

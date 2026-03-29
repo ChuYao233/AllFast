@@ -425,7 +425,7 @@ func syncOriginToProviders(siteID string, originCfg model.OriginConfig) {
 	}
 }
 
-// 删除站点（同步清理各CDN平台资源）
+// DeleteSite 删除站点（先删 DB 记录立即返回，CDN 侧清理异步进行）
 func DeleteSite(c *gin.Context) {
 	siteID := c.Param("id")
 
@@ -437,61 +437,74 @@ func DeleteSite(c *gin.Context) {
 		return
 	}
 
-	// 查询所有部署记录，调用各CDN provider 清理远端资源
-	var allCnames []string
+	// 查询所有部署记录，供异步清理使用
+	type depInfo struct {
+		id             int64
+		providerName   string
+		configID       int64
+		providerSiteID string
+		cdnCname       string
+		deployParams   string
+	}
+	var deps []depInfo
 	rows, err := database.DB.Query(
 		"SELECT id, provider, config_id, provider_site_id, cdn_cname, deploy_params FROM deployments WHERE site_id = $1", siteID,
 	)
 	if err == nil {
-		defer rows.Close()
-		ctx := context.Background()
 		for rows.Next() {
-			var depID, configID int64
-			var providerName, providerSiteID, cdnCname, deployParamsJSON string
-			if err := rows.Scan(&depID, &providerName, &configID, &providerSiteID, &cdnCname, &deployParamsJSON); err != nil {
+			var d depInfo
+			if err := rows.Scan(&d.id, &d.providerName, &d.configID, &d.providerSiteID, &d.cdnCname, &d.deployParams); err != nil {
 				continue
 			}
-			if cdnCname != "" {
-				allCnames = append(allCnames, cdnCname)
-			}
-			// 获取 provider 配置
-			p, err := provider.Get(providerName)
-			if err != nil {
-				log.Printf("[Delete] 获取提供商 %s 失败: %v", providerName, err)
-				continue
-			}
-			cfg := getProviderCfgByID(configID)
-			if cfg == nil {
-				log.Printf("[Delete] 获取配置 %d 失败", configID)
-				continue
-			}
-			// 合并部署参数
-			mergeDeployParamsToMap(cfg, deployParamsJSON)
-			// 调用 CDN 删除
-			log.Printf("[Delete] 正在从 %s 删除 %s (SiteID=%s)...", providerName, domain, providerSiteID)
-			if err := p.DeleteDomain(ctx, cfg, domain, providerSiteID); err != nil {
-				log.Printf("[Delete] 从 %s 删除失败(非致命): %v", providerName, err)
-			}
+			deps = append(deps, d)
 		}
+		rows.Close()
 	}
 
-	// 清理 DNS 解析记录（非致命，异步执行）
-	go cleanupDnsRecordsForCnames(domain, allCnames)
-
-	// 删除数据库记录（CASCADE 会删除 deployments/dns_records/certificates）
+	// 先删除数据库记录（CASCADE 删除 deployments/dns_records/certificates）
 	result, err := database.DB.Exec("DELETE FROM sites WHERE id = $1", siteID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除站点失败"})
 		return
 	}
-
 	affected, _ := result.RowsAffected()
 	if affected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "站点不存在"})
 		return
 	}
 
+	// 立即返回成功，CDN 侧清理和 DNS 清理在后台异步完成
 	c.JSON(http.StatusOK, gin.H{"message": "站点已删除"})
+
+	// 异步清理 CDN 侧资源和 DNS 记录（不阻塞请求）
+	go func() {
+		var allCnames []string
+		ctx := context.Background()
+		for _, d := range deps {
+			if d.cdnCname != "" {
+				allCnames = append(allCnames, d.cdnCname)
+			}
+			if d.providerSiteID == "" {
+				continue
+			}
+			p, err := provider.Get(d.providerName)
+			if err != nil {
+				log.Printf("[Delete] 获取提供商 %s 失败: %v", d.providerName, err)
+				continue
+			}
+			cfg := getProviderCfgByID(d.configID)
+			if cfg == nil {
+				log.Printf("[Delete] 获取配置 %d 失败", d.configID)
+				continue
+			}
+			mergeDeployParamsToMap(cfg, d.deployParams)
+			log.Printf("[Delete] 正在从 %s 删除 %s (SiteID=%s)...", d.providerName, domain, d.providerSiteID)
+			if err := p.DeleteDomain(ctx, cfg, domain, d.providerSiteID); err != nil {
+				log.Printf("[Delete] 从 %s 删除失败(非致命): %v", d.providerName, err)
+			}
+		}
+		cleanupDnsRecordsForCnames(domain, allCnames)
+	}()
 }
 
 // ToggleAutoSync PUT /api/sites/:id/auto-sync — 切换自动同步配置开关

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -89,12 +90,19 @@ func (s *DeployService) deployToConfig(ctx context.Context, site *model.Site, co
 		}
 	}
 
-	// 合并部署参数到 cfg（deploy_params 覆盖同名 key）
+	// 内置回源配置 key（不合并到 CDN API 请求的 cfg 里）
+	builtinOriginKeys := map[string]bool{
+		"_origin": true, "_origin_protocol": true,
+		"_http_port": true, "_https_port": true, "_origin_host": true,
+	}
+	// 合并部署参数到 cfg（deploy_params 覆盖同名 key，跳过内置回源 key）
 	for k, v := range deployParams {
-		cfg[k] = v
+		if !builtinOriginKeys[k] {
+			cfg[k] = v
+		}
 	}
 
-	// 序列化 deployParams 为 JSON
+	// 序列化 deployParams 为 JSON（保留全部字段，含内置回源 key）
 	deployParamsJSON := "{}"
 	if len(deployParams) > 0 {
 		if b, err := json.Marshal(deployParams); err == nil {
@@ -141,13 +149,35 @@ func (s *DeployService) deployToConfig(ctx context.Context, site *model.Site, co
 		return s.failDeploymentWithLog(deploymentID, site.ID, providerName, configID, configName, errMsg, logBuf.String())
 	}
 
-	// 构建回源配置
+	// 构建回源配置（优先使用 deployParams 中的 _origin* 字段，fallback 到站点全局配置）
 	originCfg := model.OriginConfig{
 		Origin:         site.Origin,
 		OriginProtocol: site.OriginProtocol,
 		HTTPPort:       site.HTTPPort,
 		HTTPSPort:      site.HTTPSPort,
 		OriginHost:     site.OriginHost,
+	}
+	if v := deployParams["_origin"]; v != "" {
+		originCfg.Origin = v
+	}
+	if v := deployParams["_origin_protocol"]; v != "" {
+		originCfg.OriginProtocol = v
+	}
+	if v := deployParams["_http_port"]; v != "" {
+		if n, err2 := strconv.Atoi(v); err2 == nil && n > 0 {
+			originCfg.HTTPPort = n
+		}
+	}
+	if v := deployParams["_https_port"]; v != "" {
+		if n, err2 := strconv.Atoi(v); err2 == nil && n > 0 {
+			originCfg.HTTPSPort = n
+		}
+	}
+	if v := deployParams["_origin_host"]; v != "" {
+		originCfg.OriginHost = v
+	}
+	if originCfg.OriginHost == "" {
+		originCfg.OriginHost = site.Domain
 	}
 
 	// 调用提供商API添加域名

@@ -80,20 +80,7 @@ func RemoveSiteDeployment(c *gin.Context) {
 		return
 	}
 
-	// 删除提供商侧资源（非致命）
-	if dep.ProviderSiteID != "" {
-		if p, err := provider.Get(dep.Provider); err == nil {
-			cfg := getProviderCfgByID(dep.ConfigID)
-			if cfg != nil {
-				mergeDeployParamsToMap(cfg, dep.DeployParams)
-				if err := p.DeleteDomain(context.Background(), cfg, domain, dep.ProviderSiteID); err != nil {
-					log.Printf("[RemoveAccess] 删除远端资源失败 [%s/%d]: %v", dep.Provider, dep.ID, err)
-				}
-			}
-		}
-	}
-
-	// 删除本地关联记录
+	// 先删除本地关联记录（立即返回，不等待 CDN 侧）
 	database.DB.Exec("DELETE FROM dns_records WHERE deployment_id = $1", dep.ID)
 	database.DB.Exec("DELETE FROM certificates WHERE deployment_id = $1", dep.ID)
 	if _, err := database.DB.Exec("DELETE FROM deployments WHERE id = $1", dep.ID); err != nil {
@@ -104,12 +91,26 @@ func RemoveSiteDeployment(c *gin.Context) {
 	// 回写站点状态
 	refreshSiteStatus(dep.SiteID)
 
-	// 异步清理该接入对应的 DNS 解析记录
-	if dep.CDNCname != "" {
-		go cleanupDnsRecordsForCnames(domain, []string{dep.CDNCname})
-	}
-
+	// 立即返回，CDN 侧删除和 DNS 清理异步完成
 	c.JSON(http.StatusOK, gin.H{"message": "接入已移除"})
+
+	// 异步清理提供商侧资源和 DNS 记录（不阻塞请求）
+	go func() {
+		if dep.ProviderSiteID != "" {
+			if p, err := provider.Get(dep.Provider); err == nil {
+				cfg := getProviderCfgByID(dep.ConfigID)
+				if cfg != nil {
+					mergeDeployParamsToMap(cfg, dep.DeployParams)
+					if err := p.DeleteDomain(context.Background(), cfg, domain, dep.ProviderSiteID); err != nil {
+						log.Printf("[RemoveAccess] 删除远端资源失败 [%s/%d]: %v", dep.Provider, dep.ID, err)
+					}
+				}
+			}
+		}
+		if dep.CDNCname != "" {
+			cleanupDnsRecordsForCnames(domain, []string{dep.CDNCname})
+		}
+	}()
 }
 
 func validateProviderUniquePerSite(siteID int64, configIDs []int64) error {
@@ -371,6 +372,119 @@ func RedeployDeployment(c *gin.Context) {
 	go deploySvc.DeploySite(context.Background(), siteIDInt, []int64{dep.ConfigID}, deployParamsMap)
 
 	c.JSON(http.StatusOK, gin.H{"message": "已开始重新部署"})
+}
+
+// UpdateDeploymentOrigin PUT /api/deployments/:id/origin — 更新单个 deployment 的回源配置并同步到 CDN
+func UpdateDeploymentOrigin(c *gin.Context) {
+	depIDStr := c.Param("id")
+	var depID int64
+	if _, err := parseID(depIDStr, &depID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的部署ID"})
+		return
+	}
+
+	var req struct {
+		Origin         string `json:"origin"`
+		OriginProtocol string `json:"origin_protocol"`
+		HTTPPort       int    `json:"http_port"`
+		HTTPSPort      int    `json:"https_port"`
+		OriginHost     string `json:"origin_host"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误"})
+		return
+	}
+	if req.Origin == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "源站地址不能为空"})
+		return
+	}
+	if req.OriginProtocol == "" {
+		req.OriginProtocol = "follow"
+	}
+	if req.HTTPPort <= 0 {
+		req.HTTPPort = 80
+	}
+	if req.HTTPSPort <= 0 {
+		req.HTTPSPort = 443
+	}
+
+	// 读取 deployment 记录
+	var dep model.Deployment
+	err := database.DB.QueryRow(
+		`SELECT id, site_id, provider, config_id, config_name, status, provider_site_id, cdn_cname, deploy_params, error_message, deploy_log, created_at, updated_at
+		 FROM deployments WHERE id = $1`, depID,
+	).Scan(&dep.ID, &dep.SiteID, &dep.Provider, &dep.ConfigID, &dep.ConfigName, &dep.Status,
+		&dep.ProviderSiteID, &dep.CDNCname, &dep.DeployParams, &dep.ErrorMessage, &dep.DeployLog, &dep.CreatedAt, &dep.UpdatedAt)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "部署记录不存在"})
+		return
+	}
+
+	// 查询站点域名
+	var domain string
+	database.DB.QueryRow("SELECT domain FROM sites WHERE id = $1", dep.SiteID).Scan(&domain)
+
+	// 合并 _origin* 到 deploy_params JSON
+	params := map[string]string{}
+	if dep.DeployParams != "" && dep.DeployParams != "{}" {
+		json.Unmarshal([]byte(dep.DeployParams), &params) //nolint
+	}
+	params["_origin"] = req.Origin
+	params["_origin_protocol"] = req.OriginProtocol
+	params["_http_port"] = fmt.Sprintf("%d", req.HTTPPort)
+	params["_https_port"] = fmt.Sprintf("%d", req.HTTPSPort)
+	params["_origin_host"] = req.OriginHost
+
+	newParamsJSON, _ := json.Marshal(params)
+	database.DB.Exec(
+		"UPDATE deployments SET deploy_params = $1, updated_at = $2 WHERE id = $3",
+		string(newParamsJSON), time.Now(), depID,
+	)
+
+	// 立即返回
+	c.JSON(http.StatusOK, gin.H{"message": "回源配置已更新"})
+
+	// 异步同步到 CDN 提供商
+	go func() {
+		if dep.ProviderSiteID == "" || domain == "" {
+			return
+		}
+		p, err := provider.Get(dep.Provider)
+		if err != nil {
+			log.Printf("[UpdateOrigin] 获取提供商 %s 失败: %v", dep.Provider, err)
+			return
+		}
+		cfg := getProviderCfgByID(dep.ConfigID)
+		if cfg == nil {
+			return
+		}
+		// 合并非内置参数到 cfg
+		builtinKeys := map[string]bool{
+			"_origin": true, "_origin_protocol": true,
+			"_http_port": true, "_https_port": true, "_origin_host": true,
+		}
+		for k, v := range params {
+			if !builtinKeys[k] {
+				cfg[k] = v
+			}
+		}
+		originCfg := model.OriginConfig{
+			Origin:         req.Origin,
+			OriginProtocol: req.OriginProtocol,
+			HTTPPort:       req.HTTPPort,
+			HTTPSPort:      req.HTTPSPort,
+			OriginHost:     req.OriginHost,
+		}
+		if originCfg.OriginHost == "" {
+			originCfg.OriginHost = domain
+		}
+		log.Printf("[UpdateOrigin] 正在同步 %s 回源配置到 %s...", domain, dep.Provider)
+		if err := p.UpdateOriginConfig(context.Background(), cfg, domain, dep.ProviderSiteID, originCfg); err != nil {
+			log.Printf("[UpdateOrigin] 同步 %s 回源配置失败: %v", dep.Provider, err)
+		} else {
+			log.Printf("[UpdateOrigin] %s 回源配置同步成功", dep.Provider)
+		}
+	}()
 }
 
 // parseID 解析字符串ID为int64

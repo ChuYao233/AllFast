@@ -64,6 +64,9 @@ func main() {
 		auth.POST("/sites/:id/deployments/:dep_id/redeploy", handler.RedeployDeployment)
 		auth.GET("/deployments/:id", handler.GetDeployment)
 
+		// 更新单个 deployment 的回源配置
+		auth.PUT("/deployments/:id/origin", handler.UpdateDeploymentOrigin)
+
 		// HTTPS 证书配置
 		auth.POST("/deployments/:id/https", handler.DeployHTTPS)
 
