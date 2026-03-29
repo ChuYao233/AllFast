@@ -148,13 +148,14 @@ func main() {
 		auth.GET("/sites/:id/stats", handler.SiteStat)
 		auth.GET("/sites/:id/tracking/stats", handler.GetTrackingStats)
 		auth.GET("/sites/:id/tracking/code", handler.GetTrackingCode)
+		auth.POST("/sites/:id/tracking/reset", handler.ResetTrackingID)
 		auth.GET("/sites/:id/tracking/share", handler.GetTrackingShare)
 		auth.POST("/sites/:id/tracking/share", handler.CreateTrackingShare)
 		auth.DELETE("/sites/:id/tracking/share", handler.DeleteTrackingShare)
 	}
 
-	// 公开访问（无需登录）
-	r.GET("/share/analytics/:token/stats", handler.GetPublicTrackingStats)
+	// 公开访问（无需登录，但走 /api 前缀以便前端代理）
+	r.GET("/api/share/analytics/:token/stats", handler.GetPublicTrackingStats)
 
 	// 注册前端静态文件（嵌入式 SPA，NoRoute fallback → index.html）
 	registerStaticFiles(r)

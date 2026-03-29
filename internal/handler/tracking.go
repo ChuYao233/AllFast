@@ -220,6 +220,34 @@ func GetTrackingCode(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": code, "site_id": trackingID, "domain": domain})
 }
 
+// ResetTrackingID POST /api/sites/:id/tracking/reset — 重置追踪 ID（防刷数据）
+func ResetTrackingID(c *gin.Context) {
+	siteID := c.Param("id")
+
+	// 生成新的随机 tracking_id
+	raw := make([]byte, 12)
+	if _, err := cryptoRand.Read(raw); err != nil {
+		h := sha256.Sum256([]byte(fmt.Sprintf("%d-%s-%d", time.Now().UnixNano(), siteID, time.Now().Unix())))
+		raw = h[:12]
+	}
+	newTrackingID := fmt.Sprintf("%x", raw)
+
+	if _, err := database.DB.Exec("UPDATE sites SET tracking_id = $1 WHERE id = $2", newTrackingID, siteID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "重置失败"})
+		return
+	}
+
+	// 返回新的嵌入代码
+	scheme := "https"
+	host := c.Request.Host
+	if host == "" {
+		host = "your-server.com"
+	}
+	code := fmt.Sprintf(`<script defer src="%s://%s/tracker.js" data-site-id="%s"></script>`,
+		scheme, host, newTrackingID)
+	c.JSON(http.StatusOK, gin.H{"code": code, "site_id": newTrackingID, "message": "追踪 ID 已重置，旧数据将不再关联"})
+}
+
 // GetTrackingShare GET /api/sites/:id/tracking/share — 获取当前共享 token
 func GetTrackingShare(c *gin.Context) {
 	siteID := c.Param("id")
