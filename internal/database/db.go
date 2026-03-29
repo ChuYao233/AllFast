@@ -198,6 +198,8 @@ func createTables() error {
 	migrations := []string{
 		`ALTER TABLE deployments ADD COLUMN IF NOT EXISTS deploy_log TEXT DEFAULT ''`,
 		`ALTER TABLE sites ADD COLUMN IF NOT EXISTS tracking_share_token TEXT DEFAULT ''`,
+		`ALTER TABLE sites ADD COLUMN IF NOT EXISTS tracking_id TEXT DEFAULT ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_sites_tracking_id ON sites(tracking_id) WHERE tracking_id != ''`,
 		// 关键查询索引
 		`CREATE INDEX IF NOT EXISTS idx_deployments_site_id ON deployments(site_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_deployments_config_id ON deployments(config_id)`,

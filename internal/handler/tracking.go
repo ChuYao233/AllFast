@@ -64,7 +64,7 @@ func ServeTrackerScript(c *gin.Context) {
 	c.String(http.StatusOK, trackerJS)
 }
 
-// TrackPageView POST /api/track/:siteId — 公开，允许跨域
+// TrackPageView POST /api/track/:trackingId — 公开，允许跨域
 func TrackPageView(c *gin.Context) {
 	c.Header("Access-Control-Allow-Origin", "*")
 	c.Header("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -74,7 +74,7 @@ func TrackPageView(c *gin.Context) {
 		return
 	}
 
-	siteIDStr := c.Param("siteId")
+	trackingID := c.Param("siteId") // 路由参数名保持兼容
 
 	var req struct {
 		Path      string `json:"path"`
@@ -89,11 +89,15 @@ func TrackPageView(c *gin.Context) {
 		return
 	}
 
-	// 验证站点存在
+	// 通过 tracking_id 查找站点（支持旧的数字 ID 兼容）
 	var siteID int64
-	if err := database.DB.QueryRow("SELECT id FROM sites WHERE id = $1", siteIDStr).Scan(&siteID); err != nil {
-		c.Status(http.StatusNoContent)
-		return
+	err := database.DB.QueryRow("SELECT id FROM sites WHERE tracking_id = $1", trackingID).Scan(&siteID)
+	if err != nil {
+		// 兼容旧的数字 ID
+		if err2 := database.DB.QueryRow("SELECT id FROM sites WHERE id = $1", trackingID).Scan(&siteID); err2 != nil {
+			c.Status(http.StatusNoContent)
+			return
+		}
 	}
 
 	// 生成匿名访客 ID
@@ -164,13 +168,13 @@ func GetTrackingStats(c *gin.Context) {
 	var stats model.TrackingStats
 
 	// ---- 当前周期汇总 ----
-	queryPeriodTrackingStats(siteID, from, to, &stats.Visitors, &stats.Pageviews, &stats.BounceRate, &stats.AvgDuration)
+	queryPeriodTrackingStats(siteID, from, to, &stats.Visitors, &stats.Sessions, &stats.Pageviews, &stats.BounceRate, &stats.AvgDuration)
 
 	// ---- 上一周期（环比）----
 	duration := to.Sub(from)
 	prevTo := from
 	prevFrom := from.Add(-duration)
-	queryPeriodTrackingStats(siteID, prevFrom, prevTo, &stats.PrevVisitors, &stats.PrevPageviews, &stats.PrevBounceRate, &stats.PrevAvgDuration)
+	queryPeriodTrackingStats(siteID, prevFrom, prevTo, &stats.PrevVisitors, &stats.PrevSessions, &stats.PrevPageviews, &stats.PrevBounceRate, &stats.PrevAvgDuration)
 
 	// ---- 分页 Top ----
 	stats.Pages = trackingBreakdown(siteID, "path", from, to, 10)
@@ -179,8 +183,9 @@ func GetTrackingStats(c *gin.Context) {
 	stats.OSes = trackingBreakdown(siteID, "os", from, to, 8)
 	stats.Countries = trackingBreakdown(siteID, "country_code", from, to, 10)
 
-	// ---- 流量趋势 ----
+	// ---- 流量趋势 + 热力图 ----
 	stats.Chart = trackingChart(siteID, from, to)
+	stats.Heatmap = trackingHeatmap(siteID, from, to)
 
 	c.JSON(http.StatusOK, stats)
 }
@@ -188,19 +193,31 @@ func GetTrackingStats(c *gin.Context) {
 // GetTrackingCode GET /api/sites/:id/tracking/code — 返回嵌入代码片段
 func GetTrackingCode(c *gin.Context) {
 	siteID := c.Param("id")
-	var domain string
-	if err := database.DB.QueryRow("SELECT domain FROM sites WHERE id = $1", siteID).Scan(&domain); err != nil {
+	var domain, trackingID string
+	if err := database.DB.QueryRow("SELECT domain, COALESCE(tracking_id,'') FROM sites WHERE id = $1", siteID).Scan(&domain, &trackingID); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "站点不存在"})
 		return
 	}
+
+	// 如果没有 tracking_id，生成一个随机的
+	if trackingID == "" {
+		raw := make([]byte, 12)
+		if _, err := cryptoRand.Read(raw); err != nil {
+			h := sha256.Sum256([]byte(fmt.Sprintf("%d-%s-%d", time.Now().UnixNano(), siteID, time.Now().Unix())))
+			raw = h[:12]
+		}
+		trackingID = fmt.Sprintf("%x", raw)
+		database.DB.Exec("UPDATE sites SET tracking_id = $1 WHERE id = $2", trackingID, siteID)
+	}
+
 	scheme := "https"
 	host := c.Request.Host
 	if host == "" {
 		host = "your-server.com"
 	}
 	code := fmt.Sprintf(`<script defer src="%s://%s/tracker.js" data-site-id="%s"></script>`,
-		scheme, host, siteID)
-	c.JSON(http.StatusOK, gin.H{"code": code, "site_id": siteID, "domain": domain})
+		scheme, host, trackingID)
+	c.JSON(http.StatusOK, gin.H{"code": code, "site_id": trackingID, "domain": domain})
 }
 
 // GetTrackingShare GET /api/sites/:id/tracking/share — 获取当前共享 token
@@ -255,31 +272,31 @@ func GetPublicTrackingStats(c *gin.Context) {
 	}
 	from, to := parseStatsRangeParams(c)
 	var stats model.TrackingStats
-	queryPeriodTrackingStats(siteID, from, to, &stats.Visitors, &stats.Pageviews, &stats.BounceRate, &stats.AvgDuration)
+	queryPeriodTrackingStats(siteID, from, to, &stats.Visitors, &stats.Sessions, &stats.Pageviews, &stats.BounceRate, &stats.AvgDuration)
 	duration := to.Sub(from)
 	prevTo, prevFrom := from, from.Add(-duration)
-	queryPeriodTrackingStats(siteID, prevFrom, prevTo, &stats.PrevVisitors, &stats.PrevPageviews, &stats.PrevBounceRate, &stats.PrevAvgDuration)
+	queryPeriodTrackingStats(siteID, prevFrom, prevTo, &stats.PrevVisitors, &stats.PrevSessions, &stats.PrevPageviews, &stats.PrevBounceRate, &stats.PrevAvgDuration)
 	stats.Pages = trackingBreakdown(siteID, "path", from, to, 10)
 	stats.Referrers = trackingBreakdown(siteID, "referrer", from, to, 10)
 	stats.Browsers = trackingBreakdown(siteID, "browser", from, to, 8)
 	stats.OSes = trackingBreakdown(siteID, "os", from, to, 8)
 	stats.Countries = trackingBreakdown(siteID, "country_code", from, to, 10)
 	stats.Chart = trackingChart(siteID, from, to)
+	stats.Heatmap = trackingHeatmap(siteID, from, to)
 	c.JSON(http.StatusOK, stats)
 }
 
 // ---- helpers ----
 
-func queryPeriodTrackingStats(siteID string, from, to time.Time, visitors, pageviews *int64, bounceRate, avgDur *float64) {
-	var sessions int64
+func queryPeriodTrackingStats(siteID string, from, to time.Time, visitors, sessions, pageviews *int64, bounceRate, avgDur *float64) {
 	database.DB.QueryRow(`
 		SELECT COUNT(*), COUNT(DISTINCT visitor_id), COUNT(DISTINCT session_id)
 		FROM page_views
 		WHERE site_id = $1 AND created_at >= $2 AND created_at < $3`,
 		siteID, from, to,
-	).Scan(pageviews, visitors, &sessions)
+	).Scan(pageviews, visitors, sessions)
 
-	if sessions == 0 {
+	if *sessions == 0 {
 		return
 	}
 
@@ -294,8 +311,8 @@ func queryPeriodTrackingStats(siteID string, from, to time.Time, visitors, pagev
 		) t`,
 		siteID, from, to,
 	).Scan(&bounceSessions)
-	if sessions > 0 {
-		*bounceRate = float64(bounceSessions) / float64(sessions)
+	if *sessions > 0 {
+		*bounceRate = float64(bounceSessions) / float64(*sessions)
 	}
 
 	// 平均停留时长：取每个会话最大 duration 求均值（排除 0）
@@ -392,6 +409,31 @@ func trackingChart(siteID string, from, to time.Time) []model.TrackingChartPoint
 	for rows.Next() {
 		var p model.TrackingChartPoint
 		rows.Scan(&p.T, &p.Visitors, &p.Pageviews)
+		pts = append(pts, p)
+	}
+	return pts
+}
+
+func trackingHeatmap(siteID string, from, to time.Time) []model.TrackingHeatmapPoint {
+	rows, err := database.DB.Query(`
+		SELECT EXTRACT(DOW FROM created_at AT TIME ZONE 'UTC')::int AS wd,
+		       EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC')::int AS hr,
+		       COUNT(*) AS cnt
+		FROM page_views
+		WHERE site_id = $1 AND created_at >= $2 AND created_at < $3
+		GROUP BY wd, hr
+		ORDER BY wd, hr`,
+		siteID, from, to,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var pts []model.TrackingHeatmapPoint
+	for rows.Next() {
+		var p model.TrackingHeatmapPoint
+		rows.Scan(&p.Weekday, &p.Hour, &p.Count)
 		pts = append(pts, p)
 	}
 	return pts
