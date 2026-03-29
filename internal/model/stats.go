@@ -29,6 +29,10 @@ type StatsSummary struct {
 	SitesUp        int     `json:"sites_up"`        // 状态为 active 的站点数
 	SitesTotal     int     `json:"sites_total"`     // 总站点数
 	ManagedDomains int     `json:"managed_domains"` // DNS 托管域名数（dns_cache_zones）
+	// 上一周期对比数据（用于环比计算）
+	PrevTotalRequests int64   `json:"prev_total_requests"`
+	PrevTotalBytes    int64   `json:"prev_total_bytes"`
+	PrevAvgHitRate    float64 `json:"prev_avg_hit_rate"`
 }
 
 // StatsQueryRange 查询时间范围标识

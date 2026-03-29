@@ -14,9 +14,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// StatsTimeSeries GET /api/stats/timeseries?range=30d
+// StatsTimeSeries GET /api/stats/timeseries?range=30d  或 ?from=2026-01-01&to=2026-03-29
 func StatsTimeSeries(c *gin.Context) {
-	from, to := parseStatsRange(c.DefaultQuery("range", "30d"))
+	from, to := parseStatsRangeParams(c)
 	longRange := to.Sub(from) > 48*time.Hour
 
 	var pts []model.StatPoint
@@ -93,9 +93,9 @@ func StatsTimeSeries(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": pts, "from": from, "to": to})
 }
 
-// StatsGeo GET /api/stats/geo?range=30d
+// StatsGeo GET /api/stats/geo?range=30d  或 ?from=2026-01-01&to=2026-03-29
 func StatsGeo(c *gin.Context) {
-	from, to := parseStatsRange(c.DefaultQuery("range", "30d"))
+	from, to := parseStatsRangeParams(c)
 
 	rows, err := database.DB.Query(`
 		SELECT country_code, country_name, SUM(requests), SUM(bytes)
@@ -123,63 +123,40 @@ func StatsGeo(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": pts})
 }
 
-// StatsSummary GET /api/stats/summary?range=30d
+// StatsSummary GET /api/stats/summary?range=30d  或 ?from=2026-01-01&to=2026-03-29
 func StatsSummary(c *gin.Context) {
-	from, to := parseStatsRange(c.DefaultQuery("range", "30d"))
+	from, to := parseStatsRangeParams(c)
 
 	var summary model.StatsSummary
 
-	// 历史天数据（daily 表）
-	var dailyReq, dailyBytes, dailyCached int64
-	database.DB.QueryRow(`
-		SELECT COALESCE(SUM(requests),0), COALESCE(SUM(bytes),0), COALESCE(SUM(cached_requests),0)
-		FROM cdn_stats_daily
-		WHERE stat_date >= $1 AND stat_date < $2`,
-		from.Format("2006-01-02"), to.Format("2006-01-02"),
-	).Scan(&dailyReq, &dailyBytes, &dailyCached)
+	// 当前周期
+	summary.TotalRequests, summary.TotalBytes, summary.AvgHitRate = queryPeriodStats(from, to)
 
-	// 今天实时数据（raw 表），不与 daily 重复
-	today := time.Now().UTC().Format("2006-01-02")
-	var rawReq, rawBytes, rawCached int64
-	database.DB.QueryRow(`
-		SELECT COALESCE(SUM(requests),0), COALESCE(SUM(bytes),0), COALESCE(SUM(cached_requests),0)
-		FROM cdn_stats_raw
-		WHERE DATE(period_start AT TIME ZONE 'UTC') = $1`, today,
-	).Scan(&rawReq, &rawBytes, &rawCached)
+	// 上一周期（同等时长，用于环比）
+	duration := to.Sub(from)
+	prevTo := from
+	prevFrom := from.Add(-duration)
+	summary.PrevTotalRequests, summary.PrevTotalBytes, summary.PrevAvgHitRate = queryPeriodStats(prevFrom, prevTo)
 
-	summary.TotalRequests = dailyReq + rawReq
-	summary.TotalBytes = dailyBytes + rawBytes
-	totalCached := dailyCached + rawCached
+	// 提供商数
+	database.DB.QueryRow("SELECT COUNT(*) FROM provider_configs WHERE enabled = 1").Scan(&summary.Providers)
 
-	// 提供商数：从 provider_configs 取启用数
-	database.DB.QueryRow(
-		"SELECT COUNT(*) FROM provider_configs WHERE enabled = 1",
-	).Scan(&summary.Providers)
-
-	// zone 数：从统计历史表取去重 zone 数（不依赖 DNS 缓存表）
+	// zone 数
 	database.DB.QueryRow(`
 		SELECT COUNT(DISTINCT zone_id) FROM (
 			SELECT zone_id FROM cdn_stats_daily
 			UNION
 			SELECT zone_id FROM cdn_stats_raw
-		) z`,
-	).Scan(&summary.Zones)
-
-	// zone 为 0 时降级：从 dns_cache_zones 查（DNS 同步后才有）
+		) z`).Scan(&summary.Zones)
 	if summary.Zones == 0 {
 		database.DB.QueryRow("SELECT COUNT(DISTINCT zone_id) FROM dns_cache_zones").Scan(&summary.Zones)
-	}
-
-	// 缓存命中率
-	if summary.TotalRequests > 0 {
-		summary.AvgHitRate = float64(totalCached) / float64(summary.TotalRequests)
 	}
 
 	// 站点数
 	database.DB.QueryRow("SELECT COUNT(*) FROM sites").Scan(&summary.SitesTotal)
 	database.DB.QueryRow("SELECT COUNT(*) FROM sites WHERE status = 'active'").Scan(&summary.SitesUp)
 
-	// DNS 托管域名数（dns_cache_zones 表去重 zone_name）
+	// DNS 托管域名数
 	database.DB.QueryRow("SELECT COUNT(DISTINCT zone_name) FROM dns_cache_zones").Scan(&summary.ManagedDomains)
 
 	c.JSON(http.StatusOK, summary)
@@ -419,7 +396,7 @@ func StatsClear(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "统计数据已清空"})
 }
 
-// parseStatsRange 将范围字符串转为 from/to 时间
+// parseStatsRange 将预设范围字符串转为 from/to 时间
 func parseStatsRange(rangeStr string) (from, to time.Time) {
 	to = time.Now().UTC()
 	switch model.StatsQueryRange(rangeStr) {
@@ -437,6 +414,56 @@ func parseStatsRange(rangeStr string) (from, to time.Time) {
 		from = to.AddDate(0, 0, -1)
 	default:
 		from = to.AddDate(0, 0, -30)
+	}
+	return
+}
+
+// parseStatsRangeParams 优先解析 from/to 绝对日期参数，退化到 range 预设
+func parseStatsRangeParams(c *gin.Context) (from, to time.Time) {
+	fromStr := c.Query("from")
+	toStr := c.Query("to")
+	if fromStr != "" && toStr != "" {
+		var err1, err2 error
+		from, err1 = time.Parse("2006-01-02", fromStr)
+		to, err2 = time.Parse("2006-01-02", toStr)
+		if err1 == nil && err2 == nil {
+			// to 含当天结束
+			to = to.Add(24*time.Hour - time.Second)
+			return
+		}
+	}
+	return parseStatsRange(c.DefaultQuery("range", "30d"))
+}
+
+// queryPeriodStats 查询指定时间段内的汇总数据（requests, bytes, hitRate）
+func queryPeriodStats(from, to time.Time) (totalReq, totalBytes int64, hitRate float64) {
+	var req, bytes, cached int64
+	database.DB.QueryRow(`
+		SELECT COALESCE(SUM(requests),0), COALESCE(SUM(bytes),0), COALESCE(SUM(cached_requests),0)
+		FROM cdn_stats_daily
+		WHERE stat_date >= $1 AND stat_date < $2`,
+		from.Format("2006-01-02"), to.Format("2006-01-02"),
+	).Scan(&req, &bytes, &cached)
+
+	// 若范围包含今天，补充 raw 表实时数据
+	todayStr := time.Now().UTC().Format("2006-01-02")
+	todayStart, _ := time.Parse("2006-01-02", todayStr)
+	if !to.Before(todayStart) {
+		var rawReq, rawBytes, rawCached int64
+		database.DB.QueryRow(`
+			SELECT COALESCE(SUM(requests),0), COALESCE(SUM(bytes),0), COALESCE(SUM(cached_requests),0)
+			FROM cdn_stats_raw
+			WHERE DATE(period_start AT TIME ZONE 'UTC') = $1`, todayStr,
+		).Scan(&rawReq, &rawBytes, &rawCached)
+		req += rawReq
+		bytes += rawBytes
+		cached += rawCached
+	}
+
+	totalReq = req
+	totalBytes = bytes
+	if totalReq > 0 {
+		hitRate = float64(cached) / float64(totalReq)
 	}
 	return
 }
